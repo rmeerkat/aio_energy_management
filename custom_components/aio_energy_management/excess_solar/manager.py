@@ -17,25 +17,69 @@ queue logic all live in this module.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import Callable
+from datetime import datetime
+from typing import Required, TypedDict, cast
 
-from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State, callback
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
 from ..const import (
-    CONF_BUFFER,
     CONF_CONSUMPTION,
     CONF_GRID_POWER_SENSOR,
-    CONF_IS_ON_SCHEDULE,
-    CONF_MINIMUM_OFF_TIME,
-    CONF_MINIMUM_ON_TIME,
     CONF_NAME,
-    CONF_PRIORITY,
 )
-from .binary_sensor import DEFAULT_MINIMUM_OFF_TIME, ExcessSolarBinarySensor
-from .config_flow import CONF_CONSUMPTION_ENTITY
+from .binary_sensor import ExcessSolarBinarySensor
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class ExcessSolarDeviceConfig(TypedDict, total=False):
+    """Validated configuration for one managed power device."""
+
+    name: Required[str]
+    consumption: Required[int | str]
+    consumption_entity: str
+    priority: int
+    is_on_schedule: str
+    minimum_on_time: int
+    minimum_off_time: int
+
+
+class ExcessSolarConfig(TypedDict, total=False):
+    """Validated global Excess Solar configuration."""
+
+    sensor: Required[str]
+    power_devices: Required[list[ExcessSolarDeviceConfig]]
+    buffer: int
+    name: str
+    unique_id: str
+    entry_type: str
+
+
+def validate_excess_solar_config(data: object) -> ExcessSolarConfig:
+    """Check the shape of validated config-flow or YAML data."""
+    if not isinstance(data, dict):
+        raise ValueError("Excess Solar configuration must be a mapping")
+
+    raw_config = cast(dict[str, object], data)
+    if not isinstance(raw_config.get(CONF_GRID_POWER_SENSOR), str):
+        raise ValueError("Excess Solar requires a grid power sensor")
+
+    raw_devices = raw_config.get("power_devices")
+    if not isinstance(raw_devices, list):
+        raise ValueError("Excess Solar requires a list of power devices")
+
+    for raw_device in cast(list[object], raw_devices):
+        if not isinstance(raw_device, dict):
+            raise ValueError("Each Excess Solar device must be a mapping")
+        device = cast(dict[str, object], raw_device)
+        if not isinstance(device.get(CONF_NAME), str):
+            raise ValueError("Each Excess Solar device requires a name")
+        if not isinstance(device.get(CONF_CONSUMPTION), (int, str)):
+            raise ValueError("Each Excess Solar device requires consumption")
+
+    return cast(ExcessSolarConfig, cast(object, raw_config))
 
 # Default delays
 DEFAULT_ON_OFF_DEBOUNCE = 30  # seconds: debounce solar power transients
@@ -51,6 +95,15 @@ class ExcessSolarManager:
       currently active sensor.
     """
 
+    _hass: HomeAssistant
+    _grid_sensor: str
+    _buffer: int
+    _sensors: list[ExcessSolarBinarySensor]
+    _cancel_listener: Callable[[], None] | None
+    _pending_handle: Callable[[], None] | None
+    _last_grid_power: float | None
+    _enabled: bool
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -62,12 +115,17 @@ class ExcessSolarManager:
         self._hass = hass
         self._grid_sensor = grid_sensor
         self._buffer = buffer
-        self._sensors: list[ExcessSolarBinarySensor] = sensors
+        self._sensors = sensors
         self.sort_sensors()
         self._cancel_listener = None
-        self._pending_handle: Any = None
-        self._last_grid_power: float | None = None  # most recent reading
-        self._enabled: bool = True  # master switch state
+        self._pending_handle = None
+        self._last_grid_power = None  # most recent reading
+        self._enabled = True  # master switch state
+
+    @property
+    def enabled(self) -> bool:
+        """Return True if the manager is enabled by the master switch."""
+        return self._enabled
 
     @property
     def sensors(self) -> list[ExcessSolarBinarySensor]:
@@ -131,18 +189,23 @@ class ExcessSolarManager:
                 sensor.deactivate()
 
     @callback
-    def _async_grid_sensor_changed(self, event) -> None:
+    def _async_grid_sensor_changed(
+        self, event: Event[EventStateChangedData]
+    ) -> None:
         """Handle grid power sensor state change (debounced)."""
         new_state: State | None = event.data.get("new_state")
-        if new_state is None or new_state.state in ("unknown", "unavailable", None):
+        if new_state is None:
+            return
+        state_value = new_state.state
+        if state_value in ("unknown", "unavailable"):
             return
         try:
-            grid_power = float(new_state.state)
+            grid_power = float(state_value)
         except ValueError:
             _LOGGER.warning(
                 "Cannot parse grid power from %s: '%s'",
                 self._grid_sensor,
-                new_state.state,
+                state_value,
             )
             return
 
@@ -160,7 +223,7 @@ class ExcessSolarManager:
             return
 
         @callback
-        def _fire(_now):
+        def _fire(_now: datetime) -> None:
             self._pending_handle = None
             if self._last_grid_power is not None:
                 self._hass.async_create_task(
@@ -320,7 +383,7 @@ class ExcessSolarManager:
             break
 
     @property
-    def diagnostic_info(self) -> dict:
+    def diagnostic_info(self) -> dict[str, object]:
         """Return diagnostic snapshot."""
         return {
             "grid_sensor": self._grid_sensor,
@@ -337,83 +400,9 @@ class ExcessSolarManager:
         }
 
 
-def build_sensors_from_config(
-    hass: HomeAssistant, config: dict, manager: ExcessSolarManager | None = None
-) -> tuple[list[ExcessSolarBinarySensor], list, list]:
-    """Build sensors, priority number entities, and enabled switches from config.
-
-    Returns:
-        Tuple of (binary_sensors, number_entities, enabled_switches)
-    """
-    from .number import ExcessSolarPriorityNumber  # noqa: PLC0415
-    from .switch import ExcessSolarDeviceEnabledSwitch  # noqa: PLC0415
-
-    sensors: list[ExcessSolarBinarySensor] = []
-    number_entities: list[ExcessSolarPriorityNumber] = []
-    enabled_switches: list[ExcessSolarDeviceEnabledSwitch] = []
-
-    entry_name = config.get(CONF_NAME, "Excess Solar")
-    for _idx, dev_conf in enumerate(config.get("power_devices", [])):
-        device_name = dev_conf[CONF_NAME]
-        display_name = f"{entry_name} {device_name}"
-        slug = device_name.replace(" ", "_").lower()
-        unique_id = f"excess_solar_{slug}"
-        initial_priority = dev_conf.get(CONF_PRIORITY, 100)
-
-        priority_number = ExcessSolarPriorityNumber(
-            hass=hass,
-            device_name=display_name,
-            unique_id=unique_id,
-            initial_priority=initial_priority,
-            on_priority_change_callback=(
-                manager.on_priority_changed if manager else None
-            ),
-        )
-        number_entities.append(priority_number)
-
-        enabled_switch = ExcessSolarDeviceEnabledSwitch(
-            unique_id=f"{unique_id}_enabled",
-            name=f"{display_name} Enabled",
-        )
-        enabled_switches.append(enabled_switch)
-
-        consumption: int = dev_conf.get(CONF_CONSUMPTION, 0)
-        consumption_entity: str | None = dev_conf.get(CONF_CONSUMPTION_ENTITY)
-
-        min_off = dev_conf.get(CONF_MINIMUM_OFF_TIME)
-        minimum_off_time = (
-            int(min_off) if min_off is not None else DEFAULT_MINIMUM_OFF_TIME
-        )
-
-        sensor = ExcessSolarBinarySensor(
-            hass=hass,
-            device_entity_id=display_name,
-            consumption=consumption,
-            consumption_entity=consumption_entity,
-            unique_id=unique_id,
-            name=display_name,
-            priority=initial_priority,
-            is_on_schedule_entity=dev_conf.get(CONF_IS_ON_SCHEDULE),
-            enabled_switch=enabled_switch,
-            minimum_on_time=dev_conf.get(CONF_MINIMUM_ON_TIME, 0),
-            minimum_off_time=minimum_off_time,
-            priority_number_entity=priority_number,
-        )
-        sensors.append(sensor)
-
-    return sensors, number_entities, enabled_switches
-
-
-def create_manager_from_config(
-    hass: HomeAssistant,
-    config: dict,
-    sensors: list[ExcessSolarBinarySensor],
-) -> ExcessSolarManager:
-    """Create an ``ExcessSolarManager`` from validated YAML config."""
-
-    return ExcessSolarManager(
-        hass=hass,
-        grid_sensor=config[CONF_GRID_POWER_SENSOR],
-        sensors=sensors,
-        buffer=config.get(CONF_BUFFER, 0),
-    )
+__all__ = [
+    "ExcessSolarConfig",
+    "ExcessSolarDeviceConfig",
+    "ExcessSolarManager",
+    "validate_excess_solar_config",
+]

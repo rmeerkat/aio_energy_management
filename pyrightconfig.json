@@ -1,0 +1,32 @@
+{
+  "include": ["custom_components", "tests"],
+  "reportUnusedCallResult": "none",
+  "reportImplicitStringConcatenation": "none",
+  // Home Assistant classes declare attributes that the framework or a
+  // subclass initialises later (hass, entity_description, flow state).
+  "reportUninitializedInstanceVariable": "none",
+  "executionEnvironments": [
+    {
+      "root": "tests",
+      "extraPaths": [".", "custom_components"],
+      "reportUnknownMemberType": "none",
+      "reportUnknownVariableType": "none",
+      "reportUnknownArgumentType": "none",
+      "reportUnknownParameterType": "none",
+      "reportUnknownLambdaType": "none",
+      "reportMissingParameterType": "none",
+      "reportMissingTypeStubs": "none",
+      "reportAny": "none",
+      "reportExplicitAny": "none",
+      "reportPrivateUsage": "none",
+      "reportPrivateLocalImportUsage": "none",
+      "reportUnusedParameter": "none",
+      // Flow results are total=False TypedDicts; a missing key fails the test.
+      "reportTypedDictNotRequiredAccess": "none"
+    },
+    {
+      "root": "custom_components",
+      "extraPaths": ["."]
+    }
+  ]
+}

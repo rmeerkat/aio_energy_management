@@ -1,31 +1,20 @@
 """Tests for coordinator."""
 
-from datetime import date, datetime, time
-import json
+from datetime import date, datetime
+from typing import Any
 import zoneinfo
 
-from custom_components.aio_energy_management.const import DOMAIN
 from custom_components.aio_energy_management.coordinator import (
     EnergyManagementCoordinator,
 )
 from freezegun import freeze_time
-from freezegun.api import FrozenDateTimeFactory
-import numpy as np
 import pytest
-from pytest_homeassistant_custom_component.common import load_fixture
 
-from homeassistant.core import HomeAssistant, State
-
-
-def _setup_nordpool_mock(hass: HomeAssistant, fixture: str) -> None:
-    mocked_nordpool = State.from_dict(json.loads(load_fixture(fixture, DOMAIN)))
-    hass.states.async_set(
-        "sensor.nordpool", mocked_nordpool.state, attributes=mocked_nordpool.attributes
-    )
+from homeassistant.core import HomeAssistant
 
 
 @pytest.fixture
-def mock_cheapest_hours_data_17th() -> dict:
+def mock_cheapest_hours_data_17th() -> dict[str, Any]:
     return {
         "my_cheapest_hours_sensor": {
             "active_number_of_hours": 3,
@@ -55,7 +44,7 @@ def mock_cheapest_hours_data_17th() -> dict:
 
 
 @pytest.fixture
-def mock_stored_data() -> dict:
+def mock_stored_data() -> dict[str, Any]:
     """Fixture for stored data."""
     return {
         "my_cheapest_hours_sensor": {
@@ -233,7 +222,7 @@ def mock_stored_data() -> dict:
 @freeze_time("2024-10-09 14:00+03:00")
 async def test_convert_persistent_data(hass: HomeAssistant, mock_stored_data) -> None:
     """Test stored data loading back to proper data format."""
-    hass.config.timezone = zoneinfo.ZoneInfo("Europe/Helsinki")
+    await hass.config.async_set_time_zone("Europe/Helsinki")
 
     coordinator = EnergyManagementCoordinator(hass)
     converted = coordinator.convert_datetimes(mock_stored_data)
@@ -248,19 +237,21 @@ async def test_convert_persistent_data(hass: HomeAssistant, mock_stored_data) ->
     )
 
     nxt = next_day_hours.get("next")
-    assert isinstance(nxt, dict)
+    assert nxt is not None
     assert isinstance(nxt.get("expiration"), datetime)
     assert nxt.get("expiration") == datetime(2024, 10, 10, 0, 0, tzinfo=tzinfo)
 
     lst = next_day_hours.get("list")
-    assert np.size(lst) == 2
+    assert lst is not None
+    assert len(lst) == 2
     assert lst[0]["start"] == datetime(2024, 10, 8, 4, 0, tzinfo=tzinfo)
     assert lst[0]["end"] == datetime(2024, 10, 8, 5, 0, tzinfo=tzinfo)
     assert lst[1]["start"] == datetime(2024, 10, 8, 21, 0, tzinfo=tzinfo)
     assert lst[1]["end"] == datetime(2024, 10, 9, 0, 0, tzinfo=tzinfo)
 
-    lst_next = next_day_hours.get("next").get("list")
-    assert np.size(lst_next) == 2
+    lst_next = nxt.get("list")
+    assert lst_next is not None
+    assert len(lst_next) == 2
     assert lst_next[0]["start"] == datetime(2024, 10, 9, 0, 0, tzinfo=tzinfo)
     assert lst_next[0]["end"] == datetime(2024, 10, 9, 1, 0, tzinfo=tzinfo)
     assert lst_next[1]["start"] == datetime(2024, 10, 9, 2, 0, tzinfo=tzinfo)

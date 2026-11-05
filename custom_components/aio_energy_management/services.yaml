@@ -6,3 +6,5 @@ clear_data:
         text:
       example: >-
          "my_cheapest_hours"
+
+reload:

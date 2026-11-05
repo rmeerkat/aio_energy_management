@@ -1,13 +1,21 @@
 """Tests for energy management integration binary sensors."""
 
+from collections.abc import Mapping
 from datetime import datetime
 import json
-from unittest.mock import AsyncMock, PropertyMock, patch
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 import zoneinfo
 
 from custom_components.aio_energy_management.binary_sensor import (
     CheapestHoursBinarySensor,
     _create_cheapest_hours_entity,
+)
+from custom_components.aio_energy_management.cheapest_hours.math import (
+    calculate_non_sequential_cheapest_hours,
+)
+from custom_components.aio_energy_management.coordinator import (
+    EnergyManagementCoordinator,
 )
 from custom_components.aio_energy_management.const import (
     CONF_MAX_NUMBER_OF_SLOTS,
@@ -15,10 +23,10 @@ from custom_components.aio_energy_management.const import (
     CONF_MAX_PRICE_DELTA,
     CONF_PRICE_LIMIT,
     CONF_PRICE_LIMIT_ENTITY,
-    COORDINATOR,
     DOMAIN,
 )
 from custom_components.aio_energy_management.exceptions import InvalidEntityState
+from custom_components.aio_energy_management.models.cheapest_hours_data import TimeSlot
 from freezegun import freeze_time
 from freezegun.api import FrozenDateTimeFactory
 import numpy as np
@@ -26,46 +34,85 @@ import pytest
 from pytest_homeassistant_custom_component.common import load_fixture
 
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import HomeAssistant, State, SupportsResponse
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    State,
+    SupportsResponse,
+)
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.template import Template
 import homeassistant.util.dt as dt_util
 
 
-def _setup_coordinator_mock() -> AsyncMock:
-    mock = AsyncMock()
-    mock.get_data = PropertyMock(return_value={"list": []})
-    mock.set_data = PropertyMock()
+def _attrs(sensor: CheapestHoursBinarySensor) -> dict[str, Any]:
+    """Return the state attributes for assertions on their nested values."""
+    return cast(dict[str, Any], sensor.extra_state_attributes)
 
+
+def _setup_coordinator_mock() -> MagicMock:
+    """Coordinator mock: async methods are AsyncMocks, sync methods plain mocks."""
+    mock = MagicMock(spec=EnergyManagementCoordinator)
+    mock.get_data.return_value = {"list": []}
     return mock
 
 
+def _load_state_fixture(fixture: str) -> State:
+    """Load a State from a JSON fixture; fail the test if it is malformed."""
+    state = State.from_dict(json.loads(load_fixture(fixture, DOMAIN)))
+    assert state is not None, f"Fixture {fixture} is not a valid state"
+    return state
+
+
 def _setup_nordpool_mock(hass: HomeAssistant, fixture: str) -> None:
-    mocked_nordpool = State.from_dict(json.loads(load_fixture(fixture, DOMAIN)))
+    mocked_nordpool = _load_state_fixture(fixture)
     hass.states.async_set(
         "sensor.nordpool", mocked_nordpool.state, attributes=mocked_nordpool.attributes
     )
 
 
 def _setup_entsoe_mock(hass: HomeAssistant, fixture: str) -> None:
-    mocked_entsoe = State.from_dict(json.loads(load_fixture(fixture, DOMAIN)))
+    mocked_entsoe = _load_state_fixture(fixture)
     hass.states.async_set(
         "sensor.entsoe", mocked_entsoe.state, attributes=mocked_entsoe.attributes
+    )
+
+
+def _setup_nordpool_official_mock_by_date(
+    hass: HomeAssistant, fixtures_by_date: dict[str, str]
+) -> None:
+    """Set up the Nordpool official mock service, answering per requested date.
+
+    Unlike _setup_nordpool_official_mock this keeps returning the right data when
+    the sensor fetches more than once.
+    """
+    responses: dict[str, ServiceResponse] = {
+        day: json.loads(load_fixture(fixture, DOMAIN))
+        for day, fixture in fixtures_by_date.items()
+    }
+
+    async def mock_service_call(service_call: ServiceCall) -> ServiceResponse:
+        return responses[service_call.data["date"]]
+
+    hass.services.async_register(
+        "nordpool",
+        "get_price_indices_for_date",
+        mock_service_call,
+        supports_response=SupportsResponse.ONLY,
     )
 
 
 def _setup_stromligning_mock(
     hass: HomeAssistant, today_fixture: str, tomorrow_fixture: str
 ) -> None:
-    mocked_today = State.from_dict(json.loads(load_fixture(today_fixture, DOMAIN)))
+    mocked_today = _load_state_fixture(today_fixture)
     hass.states.async_set(
         "sensor.stromligning_current_price_vat",
         mocked_today.state,
         attributes=mocked_today.attributes,
     )
-    mocked_tomorrow = State.from_dict(
-        json.loads(load_fixture(tomorrow_fixture, DOMAIN))
-    )
+    mocked_tomorrow = _load_state_fixture(tomorrow_fixture)
     hass.states.async_set(
         "binary_sensor.stromligning_tomorrow_available_vat",
         mocked_tomorrow.state,
@@ -109,7 +156,7 @@ def _setup_nordpool_official_mock(
 @freeze_time("2024-07-13 14:25+03:00")
 async def test_cheapest_hours_sequential_binary_sensors(hass: HomeAssistant) -> None:
     """Test binary sensors."""
-    hass.config.timezone = zoneinfo.ZoneInfo("Europe/Helsinki")
+    await hass.config.async_set_time_zone("Europe/Helsinki")
     coordinator_mock = _setup_coordinator_mock()
     _setup_nordpool_mock(hass, "nordpool_happy_20240713.json")
 
@@ -129,7 +176,7 @@ async def test_cheapest_hours_sequential_binary_sensors(hass: HomeAssistant) -> 
     )
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert (
         attributes["failsafe"]["start"]
@@ -166,7 +213,7 @@ async def test_cheapest_hours_non_sequential_binary_sensors(
         coordinator=coordinator_mock,
     )
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert (
         attributes["failsafe"]["start"]
@@ -234,7 +281,7 @@ async def test_expensive_hours_non_sequential_binary_sensors(
         inversed=True,
     )
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert (
         attributes["failsafe"]["start"]
@@ -292,7 +339,7 @@ async def test_cheapest_hours_full_day_binary_sensors(
     )
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert (
         attributes["failsafe"]["start"]
@@ -334,7 +381,7 @@ async def test_cheapest_hours_update_binary_sensors(
     )
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 2, 0, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2024, 7, 14, 5, 0, tzinfo=tzinfo)
@@ -345,7 +392,7 @@ async def test_cheapest_hours_update_binary_sensors(
     _setup_nordpool_mock(hass, "nordpool_happy_20240714.json")
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 23, 0, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2024, 7, 15, 1, 0, tzinfo=tzinfo)
     assert attributes["list"][1]["start"] == datetime(2024, 7, 15, 3, 0, tzinfo=tzinfo)
@@ -376,7 +423,7 @@ async def test_cheapest_hours_failsafe_binary_sensors(
         coordinator=coordinator_mock,
     )
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes.get("list") == []
     assert (
         attributes["failsafe"]["start"]
@@ -390,11 +437,11 @@ async def test_cheapest_hours_failsafe_binary_sensors(
 
     freezer.move_to("2024-07-13 19:05+03:00")
     await sensor.async_update()
-    assert sensor.extra_state_attributes["failsafe_active"] is True
+    assert _attrs(sensor)["failsafe_active"] is True
 
     freezer.move_to("2024-07-13 22:05+03:00")
     await sensor.async_update()
-    assert sensor.extra_state_attributes["failsafe_active"] is False
+    assert _attrs(sensor)["failsafe_active"] is False
 
 
 async def test_cheapest_hours_next_item(
@@ -424,7 +471,7 @@ async def test_cheapest_hours_next_item(
     )
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 18, 0, tzinfo=tzinfo)
 
     # Move to 14th 00:01, day changed. We're having proper data for this day
@@ -440,7 +487,7 @@ async def test_cheapest_hours_next_item(
     await sensor.async_update()
 
     # We should have list and next in here now
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"] is not None
     assert attributes["next"] is not None
     assert attributes["expiration"] == datetime(2024, 7, 14, 23, 0, tzinfo=tzinfo)
@@ -448,7 +495,7 @@ async def test_cheapest_hours_next_item(
     # Move to 14th 23:01, data expired
     freezer.move_to("2024-07-14 23:01+03:00")
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"] is not None
     assert attributes.get("next") is None
     assert attributes["expiration"] == datetime(2024, 7, 15, 23, 0, tzinfo=tzinfo)
@@ -457,7 +504,7 @@ async def test_cheapest_hours_next_item(
     freezer.move_to("2024-07-15 00:01+03:00")
     _setup_nordpool_mock(hass, "nordpool_tomorrow_not_valid_20240715.json")
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"] is not None
     assert attributes.get("next") is None
     assert attributes["expiration"] == datetime(2024, 7, 15, 23, 0, tzinfo=tzinfo)
@@ -490,7 +537,7 @@ async def test_cheapest_hours_next_nordpool_data_not_updated(
     )
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 14, 0, tzinfo=tzinfo)
 
     # Move to 14th 00:01, day changed. We're having proper data for this day
@@ -506,7 +553,7 @@ async def test_cheapest_hours_next_nordpool_data_not_updated(
     await sensor.async_update()
 
     # We should have list and next in here now
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"] is not None
     assert attributes["next"] is not None
     assert attributes["expiration"] == datetime(2024, 7, 15, 0, 0, tzinfo=tzinfo)
@@ -515,7 +562,7 @@ async def test_cheapest_hours_next_nordpool_data_not_updated(
     # Simulate old data as we don't pass new mock object
     freezer.move_to("2024-07-15 00:01+03:00")
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"] is not None
     assert attributes.get("next") is None
     assert attributes["expiration"] == datetime(2024, 7, 16, 0, 0, tzinfo=tzinfo)
@@ -524,7 +571,7 @@ async def test_cheapest_hours_next_nordpool_data_not_updated(
     freezer.move_to("2024-07-15 00:01+03:00")
     _setup_nordpool_mock(hass, "nordpool_tomorrow_not_valid_20240715.json")
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"] is not None
     assert attributes.get("next") is None
     assert attributes["expiration"] == datetime(2024, 7, 16, 0, 0, tzinfo=tzinfo)
@@ -557,13 +604,13 @@ async def test_cheapest_hours_entsoe(
     )
     await sensor.async_update()
 
-    assert sensor.extra_state_attributes.get("list") == []
+    assert _attrs(sensor).get("list") == []
     assert (
-        sensor.extra_state_attributes["failsafe"]["start"]
+        _attrs(sensor)["failsafe"]["start"]
         == dt_util.now().replace(hour=19, minute=0).time()
     )
     assert (
-        sensor.extra_state_attributes["failsafe"]["end"]
+        _attrs(sensor)["failsafe"]["end"]
         == dt_util.now().replace(hour=22, minute=0).time()
     )
 
@@ -571,17 +618,17 @@ async def test_cheapest_hours_entsoe(
     tzinfo = zoneinfo.ZoneInfo(key="Europe/Helsinki")
     _setup_entsoe_mock(hass, "entsoe_happy_20240918.json")
     await sensor.async_update()
-    assert sensor.extra_state_attributes.get("list") is not None
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert _attrs(sensor).get("list") is not None
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2024, 9, 19, 15, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2024, 9, 19, 16, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][1]["start"] == datetime(
+    assert _attrs(sensor)["list"][1]["start"] == datetime(
         2024, 9, 19, 21, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][1]["end"] == datetime(
+    assert _attrs(sensor)["list"][1]["end"] == datetime(
         2024, 9, 19, 23, 0, tzinfo=tzinfo
     )
     freezer.move_to("2024-09-19 14:30+03:00")
@@ -619,15 +666,15 @@ async def test_cheapest_hours_entsoe_over_night(
         coordinator=coordinator_mock,
     )
     await sensor.async_update()
-    assert sensor.extra_state_attributes.get("list") is not None
+    assert _attrs(sensor).get("list") is not None
 
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2024, 9, 18, 22, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2024, 9, 19, 1, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2024, 9, 19, 9, 0, tzinfo=tzinfo
     )
 
@@ -664,33 +711,33 @@ async def test_cheapest_hours_entsoe_mtu15(
     )
     await sensor.async_update()
 
-    assert len(sensor.extra_state_attributes.get("list")) == 3
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert len(_attrs(sensor)["list"]) == 3
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2025, 10, 29, 11, 30, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2025, 10, 29, 11, 45, tzinfo=tzinfo
     )
 
-    assert sensor.extra_state_attributes["list"][1]["start"] == datetime(
+    assert _attrs(sensor)["list"][1]["start"] == datetime(
         2025, 10, 29, 13, 15, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][1]["end"] == datetime(
+    assert _attrs(sensor)["list"][1]["end"] == datetime(
         2025, 10, 29, 15, 30, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][2]["start"] == datetime(
+    assert _attrs(sensor)["list"][2]["start"] == datetime(
         2025, 10, 29, 22, 30, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][2]["end"] == datetime(
+    assert _attrs(sensor)["list"][2]["end"] == datetime(
         2025, 10, 29, 23, 0, tzinfo=tzinfo
     )
 
     assert (
-        sensor.extra_state_attributes["failsafe"]["start"]
+        _attrs(sensor)["failsafe"]["start"]
         == dt_util.now().replace(hour=19, minute=0).time()
     )
     assert (
-        sensor.extra_state_attributes["failsafe"]["end"]
+        _attrs(sensor)["failsafe"]["end"]
         == dt_util.now().replace(hour=22, minute=0).time()
     )
 
@@ -723,26 +770,26 @@ async def test_cheapest_hours_entsoe_mtu15_conversion_to_mtu60(
     )
     await sensor.async_update()
 
-    assert len(sensor.extra_state_attributes.get("list")) == 2
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert len(_attrs(sensor)["list"]) == 2
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2025, 10, 29, 13, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2025, 10, 29, 15, 0, tzinfo=tzinfo
     )
 
-    assert sensor.extra_state_attributes["list"][1]["start"] == datetime(
+    assert _attrs(sensor)["list"][1]["start"] == datetime(
         2025, 10, 29, 22, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][1]["end"] == datetime(
+    assert _attrs(sensor)["list"][1]["end"] == datetime(
         2025, 10, 29, 23, 0, tzinfo=tzinfo
     )
     assert (
-        sensor.extra_state_attributes["failsafe"]["start"]
+        _attrs(sensor)["failsafe"]["start"]
         == dt_util.now().replace(hour=19, minute=0).time()
     )
     assert (
-        sensor.extra_state_attributes["failsafe"]["end"]
+        _attrs(sensor)["failsafe"]["end"]
         == dt_util.now().replace(hour=22, minute=0).time()
     )
 
@@ -773,11 +820,11 @@ async def test_trigger_time(
     )
 
     await sensor.async_update()
-    assert sensor.extra_state_attributes.get("list") == []  # TODO:..
+    assert _attrs(sensor).get("list") == []  # TODO:..
 
     freezer.move_to("2024-07-13 17:00+03:00")
     await sensor.async_update()
-    assert sensor.extra_state_attributes.get("list") is not None
+    assert _attrs(sensor).get("list") is not None
 
 
 async def test_trigger_hour(
@@ -806,11 +853,11 @@ async def test_trigger_hour(
     )
 
     await sensor.async_update()
-    assert sensor.extra_state_attributes.get("list") == []
+    assert _attrs(sensor).get("list") == []
 
     freezer.move_to("2024-07-13 17:00+03:00")
     await sensor.async_update()
-    assert sensor.extra_state_attributes.get("list") is not None
+    assert _attrs(sensor).get("list") is not None
 
 
 async def test_max_price(hass: HomeAssistant, freezer: FrozenDateTimeFactory) -> None:
@@ -839,23 +886,22 @@ async def test_max_price(hass: HomeAssistant, freezer: FrozenDateTimeFactory) ->
     await sensor.async_update()
 
     # Only one hour should be found that is less than -0.7 max price value
-    assert sensor.extra_state_attributes.get("list") is not None
+    assert _attrs(sensor).get("list") is not None
 
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2024, 7, 14, 15, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2024, 7, 14, 16, 0, tzinfo=tzinfo
     )
 
-    assert np.size(sensor.extra_state_attributes["list"]) == 1
+    assert np.size(_attrs(sensor)["list"]) == 1
 
 
 async def test_price_limit_negative(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory
 ) -> None:
     """Test cheapest binary sensors price limit with negative and no matchces."""
-    tzinfo = zoneinfo.ZoneInfo(key="Europe/Helsinki")
     coordinator_mock = _setup_coordinator_mock()
     freezer.move_to("2024-07-13 14:25+03:00")
 
@@ -882,7 +928,7 @@ async def test_price_limit_negative(
     )
     freezer.move_to("2025-03-14 14:30+03:00")
     await sensor.async_update()
-    assert np.size(sensor.extra_state_attributes["list"]) == 0
+    assert np.size(_attrs(sensor)["list"]) == 0
 
 
 async def test_max_price_no_matches(
@@ -912,8 +958,8 @@ async def test_max_price_no_matches(
     await sensor.async_update()
 
     # Only one hour should be found that is less than -0.7 max price value
-    assert sensor.extra_state_attributes.get("list") is not None
-    assert np.size(sensor.extra_state_attributes["list"]) == 0
+    assert _attrs(sensor).get("list") is not None
+    assert np.size(_attrs(sensor)["list"]) == 0
 
 
 async def test_failsafe(hass: HomeAssistant, freezer: FrozenDateTimeFactory) -> None:
@@ -939,13 +985,13 @@ async def test_failsafe(hass: HomeAssistant, freezer: FrozenDateTimeFactory) -> 
     await sensor.async_update()
 
     assert sensor.is_on is False
-    assert sensor.extra_state_attributes.get("list") == []
+    assert _attrs(sensor).get("list") == []
 
     # Failsafe should be running
     freezer.move_to("2024-07-15 00:00+03:00")
     await sensor.async_update()
     assert sensor.is_on is True
-    assert sensor.extra_state_attributes.get("list") == []
+    assert _attrs(sensor).get("list") == []
     freezer.move_to("2024-07-15 02:59+03:00")
     await sensor.async_update()
     assert sensor.is_on is True
@@ -954,7 +1000,7 @@ async def test_failsafe(hass: HomeAssistant, freezer: FrozenDateTimeFactory) -> 
     freezer.move_to("2024-07-15 03:00+03:00")
     await sensor.async_update()
     assert sensor.is_on is False
-    assert sensor.extra_state_attributes.get("list") == []
+    assert _attrs(sensor).get("list") == []
 
 
 async def test_failsafe_not_triggering_after_last_hour(
@@ -982,33 +1028,33 @@ async def test_failsafe_not_triggering_after_last_hour(
     freezer.move_to("2024-07-13 23:01+03:00")
     await sensor.async_update()
 
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2024, 7, 15, 0, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes.get("next") is None
+    assert _attrs(sensor).get("next") is None
 
     freezer.move_to("2024-07-14 00:01+03:00")
     _setup_nordpool_mock(hass, "nordpool_tomorrow_not_valid_20240714.json")
     await sensor.async_update()
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2024, 7, 15, 0, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes.get("next") is None
+    assert _attrs(sensor).get("next") is None
 
     freezer.move_to("2024-07-14 14:25+03:00")
     _setup_nordpool_mock(hass, "nordpool_happy_20240714.json")
     await sensor.async_update()
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2024, 7, 15, 0, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["next"]["expiration"] == datetime(
+    assert _attrs(sensor)["next"]["expiration"] == datetime(
         2024, 7, 16, 0, 0, tzinfo=tzinfo
     )
 
     freezer.move_to("2024-07-15 00:01+03:00")
     _setup_nordpool_mock(hass, "nordpool_tomorrow_not_valid_20240715.json")
     await sensor.async_update()
-    assert sensor.extra_state_attributes["failsafe_active"] is False
+    assert _attrs(sensor)["failsafe_active"] is False
 
 
 async def test_cheapest_hours_binary_sensors_daylight_savings_sequential_summer_time(
@@ -1016,7 +1062,7 @@ async def test_cheapest_hours_binary_sensors_daylight_savings_sequential_summer_
 ) -> None:
     """Test summer time binary sensors."""
     tzinfo = zoneinfo.ZoneInfo(key="Europe/Helsinki")
-    hass.config.timezone = tzinfo
+    await hass.config.async_set_time_zone("Europe/Helsinki")
     coordinator_mock = _setup_coordinator_mock()
 
     # Test today summer time
@@ -1037,7 +1083,7 @@ async def test_cheapest_hours_binary_sensors_daylight_savings_sequential_summer_
     )
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 10, 0, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2024, 7, 14, 13, 0, tzinfo=tzinfo)
 
@@ -1046,7 +1092,7 @@ async def test_cheapest_hours_binary_sensors_daylight_savings_sequential_summer_
     _setup_nordpool_mock(hass, "nordpool_happy_today_summertime.json")
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 23, 0, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2024, 7, 15, 2, 0, tzinfo=tzinfo)
 
@@ -1056,7 +1102,7 @@ async def test_cheapest_hours_binary_sensors_daylight_savings_non_sequential_sum
 ) -> None:
     """Test summer time binary sensors."""
     tzinfo = zoneinfo.ZoneInfo(key="Europe/Helsinki")
-    hass.config.timezone = tzinfo
+    await hass.config.async_set_time_zone("Europe/Helsinki")
     coordinator_mock = _setup_coordinator_mock()
 
     # Test today summer time
@@ -1077,7 +1123,7 @@ async def test_cheapest_hours_binary_sensors_daylight_savings_non_sequential_sum
     )
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 10, 0, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2024, 7, 14, 13, 0, tzinfo=tzinfo)
@@ -1087,7 +1133,7 @@ async def test_cheapest_hours_binary_sensors_daylight_savings_non_sequential_sum
     _setup_nordpool_mock(hass, "nordpool_happy_today_summertime.json")
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert np.size(attributes["list"]) == 2
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 23, 0, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2024, 7, 15, 1, 0, tzinfo=tzinfo)
@@ -1100,7 +1146,7 @@ async def test_cheapest_hours_offset(
 ) -> None:
     """Test summer time binary sensors."""
     tzinfo = zoneinfo.ZoneInfo(key="Europe/Helsinki")
-    hass.config.timezone = tzinfo
+    await hass.config.async_set_time_zone("Europe/Helsinki")
     coordinator_mock = _setup_coordinator_mock()
 
     # Test today summer time
@@ -1122,7 +1168,7 @@ async def test_cheapest_hours_offset(
     )
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"][0]["start"] == datetime(
         2024, 7, 14, 23, 30, tzinfo=tzinfo
     )
@@ -1132,7 +1178,7 @@ async def test_cheapest_hours_offset(
     _setup_nordpool_mock(hass, "nordpool_happy_20240714_cheapest_first.json")
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert attributes["list"][0]["start"] == datetime(
         2024, 7, 14, 23, 30, tzinfo=tzinfo
@@ -1155,12 +1201,12 @@ async def test_cheapest_hours_offset(
     freezer.move_to("2024-07-15 00:30+03:00")
     _setup_nordpool_mock(hass, "nordpool_tomorrow_not_valid_20240715.json")
     await sensor.async_update()
-    assert sensor.extra_state_attributes == attributes
+    assert _attrs(sensor) == attributes
 
     # Move to after new expiration, list_swap should have been made
     freezer.move_to("2024-07-15 00:46+03:00")
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"][0]["start"] == datetime(2024, 7, 15, 0, 30, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2024, 7, 15, 1, 45, tzinfo=tzinfo)
     assert attributes["expiration"] == datetime(2024, 7, 16, 0, 0, tzinfo=tzinfo)
@@ -1175,7 +1221,7 @@ async def test_cheapest_hours_binary_sensors_daylight_savings_non_sequential_win
 ) -> None:
     """Test summer time binary sensors."""
     tzinfo = zoneinfo.ZoneInfo(key="Europe/Helsinki")
-    hass.config.timezone = tzinfo
+    await hass.config.async_set_time_zone("Europe/Helsinki")
     coordinator_mock = _setup_coordinator_mock()
 
     # Test today summer time
@@ -1196,7 +1242,7 @@ async def test_cheapest_hours_binary_sensors_daylight_savings_non_sequential_win
     )
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 10, 0, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2024, 7, 14, 13, 0, tzinfo=tzinfo)
@@ -1206,7 +1252,7 @@ async def test_cheapest_hours_binary_sensors_daylight_savings_non_sequential_win
     _setup_nordpool_mock(hass, "nordpool_happy_today_wintertime.json")
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert np.size(attributes["list"]) == 2
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 23, 0, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2024, 7, 15, 1, 0, tzinfo=tzinfo)
@@ -1245,15 +1291,15 @@ async def test_nordpool_official(
     freezer.move_to("2025-03-14 14:30+03:00")
     await sensor.async_update()
 
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2025, 3, 16, 0, 0, tzinfo=tzinfo
     )
 
-    assert np.size(sensor.extra_state_attributes["list"]) == 1
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert np.size(_attrs(sensor)["list"]) == 1
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2025, 3, 15, 3, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2025, 3, 15, 6, 0, tzinfo=tzinfo
     )
 
@@ -1289,22 +1335,22 @@ async def test_nordpool_official_15min_to_60min(
     freezer.move_to("2025-03-14 14:30+03:00")
     await sensor.async_update()
 
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2025, 3, 16, 0, 0, tzinfo=tzinfo
     )
 
-    assert np.size(sensor.extra_state_attributes["list"]) == 2
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert np.size(_attrs(sensor)["list"]) == 2
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2025, 3, 15, 11, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2025, 3, 15, 13, 0, tzinfo=tzinfo
     )
 
-    assert sensor.extra_state_attributes["list"][1]["start"] == datetime(
+    assert _attrs(sensor)["list"][1]["start"] == datetime(
         2025, 3, 15, 15, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][1]["end"] == datetime(
+    assert _attrs(sensor)["list"][1]["end"] == datetime(
         2025, 3, 15, 16, 0, tzinfo=tzinfo
     )
 
@@ -1341,29 +1387,29 @@ async def test_nordpool_official_15min_mtu_non_sequential(
     freezer.move_to("2025-03-14 14:30+03:00")
     await sensor.async_update()
 
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2025, 3, 16, 0, 0, tzinfo=tzinfo
     )
 
-    assert np.size(sensor.extra_state_attributes["list"]) == 3
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert np.size(_attrs(sensor)["list"]) == 3
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2025, 3, 15, 10, 30, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2025, 3, 15, 10, 45, tzinfo=tzinfo
     )
 
-    assert sensor.extra_state_attributes["list"][1]["start"] == datetime(
+    assert _attrs(sensor)["list"][1]["start"] == datetime(
         2025, 3, 15, 11, 15, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][1]["end"] == datetime(
+    assert _attrs(sensor)["list"][1]["end"] == datetime(
         2025, 3, 15, 13, 0, tzinfo=tzinfo
     )
 
-    assert sensor.extra_state_attributes["list"][2]["start"] == datetime(
+    assert _attrs(sensor)["list"][2]["start"] == datetime(
         2025, 3, 15, 15, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][2]["end"] == datetime(
+    assert _attrs(sensor)["list"][2]["end"] == datetime(
         2025, 3, 15, 16, 0, tzinfo=tzinfo
     )
 
@@ -1400,15 +1446,15 @@ async def test_nordpool_official_15min_mtu_sequential(
     freezer.move_to("2025-03-14 14:30+03:00")
     await sensor.async_update()
 
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2025, 3, 16, 0, 0, tzinfo=tzinfo
     )
 
-    assert np.size(sensor.extra_state_attributes["list"]) == 1
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert np.size(_attrs(sensor)["list"]) == 1
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2025, 3, 15, 10, 15, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2025, 3, 15, 13, 15, tzinfo=tzinfo
     )
 
@@ -1445,34 +1491,34 @@ async def test_nordpool_official_15min_mtu_summer_time(
     freezer.move_to("2025-03-14 14:30+03:00")
     await sensor.async_update()
 
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2025, 3, 16, 0, 0, tzinfo=tzinfo
     )
 
-    assert np.size(sensor.extra_state_attributes["list"]) == 3
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert np.size(_attrs(sensor)["list"]) == 3
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2025, 3, 15, 10, 30, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2025, 3, 15, 10, 45, tzinfo=tzinfo
     )
 
-    assert sensor.extra_state_attributes["list"][1]["start"] == datetime(
+    assert _attrs(sensor)["list"][1]["start"] == datetime(
         2025, 3, 15, 11, 15, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][1]["end"] == datetime(
+    assert _attrs(sensor)["list"][1]["end"] == datetime(
         2025, 3, 15, 13, 0, tzinfo=tzinfo
     )
 
-    assert sensor.extra_state_attributes["list"][2]["start"] == datetime(
+    assert _attrs(sensor)["list"][2]["start"] == datetime(
         2025, 3, 15, 15, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][2]["end"] == datetime(
+    assert _attrs(sensor)["list"][2]["end"] == datetime(
         2025, 3, 15, 16, 0, tzinfo=tzinfo
     )
 
 
-async def test_nordpool_official_15min_mtu_summer_time(
+async def test_nordpool_official_15min_mtu_dst_spring_forward(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory
 ) -> None:
     """Test official nord pool integration, 15min mtu, non-sequential, DST spring-forward transition.
@@ -1484,7 +1530,7 @@ async def test_nordpool_official_15min_mtu_summer_time(
     """
     tzinfo = zoneinfo.ZoneInfo(key="Europe/Helsinki")
     coordinator_mock = _setup_coordinator_mock()
-    hass.config.timezone = zoneinfo.ZoneInfo("Europe/Helsinki")
+    await hass.config.async_set_time_zone("Europe/Helsinki")
     # Stay at 2026-03-28 to match the fixture dates (tomorrow = 2026-03-29, DST day)
     freezer.move_to("2026-03-28 14:25+02:00")
 
@@ -1515,7 +1561,7 @@ async def test_nordpool_official_15min_mtu_summer_time(
     # the DST spring-forward day (March 29, 2026, Helsinki EEST).
     # Before the fix, tomorrow_prices was [] due to date-equality filtering
     # excluding UTC entries that crossed local midnight on the spring-forward day.
-    result_list = sensor.extra_state_attributes["list"]
+    result_list = _attrs(sensor)["list"]
     assert len(result_list) == 6
 
     assert result_list[0]["start"] == datetime(2026, 3, 29, 13, 30, tzinfo=tzinfo)
@@ -1537,7 +1583,7 @@ async def test_nordpool_official_15min_mtu_summer_time(
     assert result_list[5]["end"] == datetime(2026, 3, 30, 0, 0, tzinfo=tzinfo)
 
     # Expiration is midnight of the day after tomorrow (March 30 00:00 EET+3)
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2026, 3, 30, 0, 0, tzinfo=tzinfo
     )
 
@@ -1554,7 +1600,7 @@ async def test_nordpool_official_60min_mtu_summer_time_starting_today(
     """
     tzinfo = zoneinfo.ZoneInfo(key="Europe/Helsinki")
     coordinator_mock = _setup_coordinator_mock()
-    hass.config.timezone = zoneinfo.ZoneInfo("Europe/Helsinki")
+    await hass.config.async_set_time_zone("Europe/Helsinki")
     # Stay at 2026-03-28 to match the fixture dates (tomorrow = 2026-03-29, DST day)
     freezer.move_to("2026-03-28 14:25+02:00")
 
@@ -1583,7 +1629,7 @@ async def test_nordpool_official_60min_mtu_summer_time_starting_today(
 
     # 4 cheapest non-sequential 1-hour slots (starting_today=True, spanning
     # today evening and the DST spring-forward day of March 29, 2026 Helsinki).
-    result_list = sensor.extra_state_attributes["list"]
+    result_list = _attrs(sensor)["list"]
     assert len(result_list) == 2
 
     assert result_list[0]["start"] == datetime(2026, 3, 28, 23, 0, tzinfo=tzinfo)
@@ -1627,25 +1673,25 @@ async def test_nordpool_number_of_slots_mtu15(
     freezer.move_to("2025-03-14 14:30+03:00")
     await sensor.async_update()
 
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2025, 3, 16, 0, 0, tzinfo=tzinfo
     )
 
-    assert np.size(sensor.extra_state_attributes["list"]) == 1
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert np.size(_attrs(sensor)["list"]) == 1
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2025, 3, 15, 15, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2025, 3, 15, 15, 30, tzinfo=tzinfo
     )
 
-    assert sensor.extra_state_attributes["active_number_of_slots"] == 2
+    assert _attrs(sensor)["active_number_of_slots"] == 2
     assert (
-        sensor.extra_state_attributes["failsafe"]["start"]
+        _attrs(sensor)["failsafe"]["start"]
         == datetime.now().replace(hour=0, minute=0).time()
     )
     assert (
-        sensor.extra_state_attributes["failsafe"]["end"]
+        _attrs(sensor)["failsafe"]["end"]
         == datetime.now().replace(hour=0, minute=30).time()
     )
 
@@ -1682,31 +1728,31 @@ async def test_nordpool_number_of_slots_mtu60(
     freezer.move_to("2025-03-14 14:30+03:00")
     await sensor.async_update()
 
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2025, 3, 16, 0, 0, tzinfo=tzinfo
     )
 
-    assert np.size(sensor.extra_state_attributes["list"]) == 2
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert np.size(_attrs(sensor)["list"]) == 2
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2025, 3, 15, 11, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2025, 3, 15, 12, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][1]["start"] == datetime(
+    assert _attrs(sensor)["list"][1]["start"] == datetime(
         2025, 3, 15, 15, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][1]["end"] == datetime(
+    assert _attrs(sensor)["list"][1]["end"] == datetime(
         2025, 3, 15, 16, 0, tzinfo=tzinfo
     )
 
-    assert sensor.extra_state_attributes["active_number_of_slots"] == 2
+    assert _attrs(sensor)["active_number_of_slots"] == 2
     assert (
-        sensor.extra_state_attributes["failsafe"]["start"]
+        _attrs(sensor)["failsafe"]["start"]
         == datetime.now().replace(hour=0, minute=0).time()
     )
     assert (
-        sensor.extra_state_attributes["failsafe"]["end"]
+        _attrs(sensor)["failsafe"]["end"]
         == datetime.now().replace(hour=2, minute=0).time()
     )
 
@@ -1759,15 +1805,15 @@ async def test_price_modifications(
     freezer.move_to("2025-03-14 14:30+03:00")
     await sensor.async_update()
 
-    assert sensor.extra_state_attributes["expiration"] == datetime(
+    assert _attrs(sensor)["expiration"] == datetime(
         2025, 3, 16, 0, 0, tzinfo=tzinfo
     )
 
-    assert np.size(sensor.extra_state_attributes["list"]) == 1
-    assert sensor.extra_state_attributes["list"][0]["start"] == datetime(
+    assert np.size(_attrs(sensor)["list"]) == 1
+    assert _attrs(sensor)["list"][0]["start"] == datetime(
         2025, 3, 15, 10, 0, tzinfo=tzinfo
     )
-    assert sensor.extra_state_attributes["list"][0]["end"] == datetime(
+    assert _attrs(sensor)["list"][0]["end"] == datetime(
         2025, 3, 15, 13, 0, tzinfo=tzinfo
     )
 
@@ -1820,7 +1866,7 @@ async def test_nordpool_official_price_modifications_timezone(
     freezer.move_to("2026-03-23 14:30+02:00")
     await sensor.async_update()
 
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"][0]["start"] == datetime(2026, 3, 23, 23, 0, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2026, 3, 24, 2, 0, tzinfo=tzinfo)
 
@@ -1864,7 +1910,7 @@ async def test_nordpool_custom_price_modifications_timezone(
     )
     freezer.move_to("2024-07-13 14:30+02:00")
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
     assert attributes["list"][0]["start"] == datetime(2024, 7, 14, 2, 0, tzinfo=tzinfo)
     assert attributes["list"][0]["end"] == datetime(2024, 7, 14, 5, 0, tzinfo=tzinfo)
 
@@ -1903,7 +1949,7 @@ async def test_cheapest_hours_stromligning_non_sequential(
         coordinator=coordinator_mock,
     )
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert attributes.get("list") is not None
     assert len(attributes["list"]) > 0
@@ -1961,7 +2007,7 @@ async def test_cheapest_hours_stromligning_sequential(
         coordinator=coordinator_mock,
     )
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert attributes.get("list") is not None
     assert len(attributes["list"]) == 1
@@ -2007,7 +2053,7 @@ async def test_cheapest_hours_stromligning_tomorrow_not_available(
         coordinator=coordinator_mock,
     )
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     # Should have empty list since tomorrow data is not available
     assert attributes.get("list") == []
@@ -2025,7 +2071,6 @@ async def test_cheapest_hours_stromligning_expensive_hours(
 ) -> None:
     """Test Strømligning inversed (expensive hours)."""
     coordinator_mock = _setup_coordinator_mock()
-    tzinfo = zoneinfo.ZoneInfo(key="Europe/Helsinki")
 
     freezer.move_to("2026-04-01 15:00+03:00")
     _setup_stromligning_mock(
@@ -2050,7 +2095,7 @@ async def test_cheapest_hours_stromligning_expensive_hours(
         inversed=True,
     )
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert attributes.get("list") is not None
     assert len(attributes["list"]) > 0
@@ -2096,7 +2141,7 @@ async def test_cheapest_hours_stromligning_daytime(
         coordinator=coordinator_mock,
     )
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert attributes.get("list") is not None
     assert len(attributes["list"]) > 0
@@ -2114,24 +2159,60 @@ async def test_cheapest_hours_stromligning_daytime(
     assert sensor.is_on is True
 
 
-async def test_nordpool_official_missing_tomorrow(hass: HomeAssistant) -> None:
-    """Test if tomorrow prices are not known yet."""
+async def test_nordpool_official_missing_tomorrow(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """Fall back to today's prices when the tomorrow service call raises.
 
-    mock_responses = [
-        {
-            "indices": [{"start": "2026-07-16T12:00:00+02:00", "value": 10.0}]
-        },  # Yesterday
-        {"indices": [{"start": "2026-07-17T12:00:00+02:00", "value": 12.0}]},  # Today
-        ServiceValidationError("No data available for tomorrow"),  # Tomorrow (Wrong!)
+    The official Nord Pool integration raises ServiceValidationError when no
+    prices are published yet for the requested date.
+    """
+    freezer.move_to("2025-03-14 10:00+03:00")
+    responses: list[ServiceResponse | Exception] = [
+        json.loads(load_fixture("nordpool_official_service_15min_yesterday.json", DOMAIN)),
+        json.loads(load_fixture("nordpool_official_service_15min_today.json", DOMAIN)),
+        ServiceValidationError("No data available for tomorrow"),
     ]
+    requested_dates: list[str] = []
 
-    def side_effect(*args, **kwargs):
-        if not mock_responses:
-            return {}
-        response = mock_responses.pop(0)
+    async def mock_service_call(service_call: ServiceCall) -> ServiceResponse:
+        requested_dates.append(service_call.data["date"])
+        response = responses.pop(0)
         if isinstance(response, Exception):
             raise response
         return response
+
+    hass.services.async_register(
+        "nordpool",
+        "get_price_indices_for_date",
+        mock_service_call,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    sensor = CheapestHoursBinarySensor(
+        hass=hass,
+        nordpool_official_config_entry="DUMMY",
+        unique_id="test_missing_tomorrow",
+        name="Test Missing Tomorrow",
+        first_hour=18,
+        last_hour=23,
+        starting_today=False,
+        number_of_slots=2,
+        sequential=False,
+        coordinator=_setup_coordinator_mock(),
+    )
+
+    await sensor.async_update()
+
+    # All three days were requested; the failing tomorrow call was the last one.
+    assert requested_dates == ["2025-03-13", "2025-03-14", "2025-03-15"]
+    assert responses == []
+
+    # The sensor did not give up, but calculated a schedule from today's prices.
+    assert sensor._data.get("today_only") is True
+    slots = _attrs(sensor)["list"]
+    assert len(slots) > 0
+    assert all(slot["start"].date() == dt_util.now().date() for slot in slots)
 
 
 def _make_sensor(hass: HomeAssistant) -> CheapestHoursBinarySensor:
@@ -2182,7 +2263,6 @@ async def test_yaml_price_limit_zero_is_applied(
     hass: HomeAssistant, price_limit: float
 ) -> None:
     """price_limit 0 is a valid limit and must not be ignored."""
-    hass.data[DOMAIN] = {COORDINATOR: _setup_coordinator_mock()}
     sensor = _create_cheapest_hours_entity(
         hass,
         {
@@ -2196,13 +2276,14 @@ async def test_yaml_price_limit_zero_is_applied(
             "inversed": True,
             CONF_PRICE_LIMIT: price_limit,
         },
+        coordinator=_setup_coordinator_mock(),
     )
     sensor._update_entity_variables()
-    assert sensor._data["active_price_limit"] == 0.0
-    assert sensor.extra_state_attributes["price_limit"] == 0
+    assert sensor._data.get("active_price_limit") == 0.0
+    assert _attrs(sensor)["price_limit"] == 0
 
 
-def _covered_hours(attributes: dict) -> float:
+def _covered_hours(attributes: Mapping[str, Any]) -> float:
     """Return the total number of hours covered by the sensor's slot list."""
     return sum(
         (item["end"] - item["start"]).total_seconds() / 3600.0
@@ -2230,7 +2311,7 @@ async def test_cheapest_hours_add_flexible_extends_slots(
         coordinator=_setup_coordinator_mock(),
     )
     await base_sensor.async_update()
-    base_attributes = base_sensor.extra_state_attributes
+    base_attributes = _attrs(base_sensor)
     base_hours = _covered_hours(base_attributes)
 
     flexible_sensor = CheapestHoursBinarySensor(
@@ -2247,7 +2328,7 @@ async def test_cheapest_hours_add_flexible_extends_slots(
         coordinator=_setup_coordinator_mock(),
     )
     await flexible_sensor.async_update()
-    flexible_attributes = flexible_sensor.extra_state_attributes
+    flexible_attributes = _attrs(flexible_sensor)
 
     # A generous price limit pulls in every slot in the 18-23 window (6 hours),
     # which is more than the base two slots.
@@ -2283,7 +2364,7 @@ async def test_cheapest_hours_add_flexible_dynamic_entities(
         coordinator=_setup_coordinator_mock(),
     )
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     assert _covered_hours(attributes) == 6.0
     assert attributes["max_number_of_slots"] == "input_number.max_slots"
@@ -2320,11 +2401,11 @@ async def test_cheapest_hours_add_flexible_max_price_delta(
     await sensor.async_update()
 
     # Check whether the hours are correctly expanded based on the delta.
-    assert _covered_hours(sensor.extra_state_attributes) == 6.0
+    assert _covered_hours(_attrs(sensor)) == 6.0
 
     # Check internal data and the exposure of the sensor attributes.
-    assert sensor._data["active_max_price_delta"] == 9999.0
-    assert sensor.extra_state_attributes.get("max_price_delta") == 9999.0
+    assert sensor._data.get("active_max_price_delta") == 9999.0
+    assert _attrs(sensor).get("max_price_delta") == 9999.0
 
 
 async def test_cheapest_hours_add_flexible_sequential(
@@ -2348,7 +2429,7 @@ async def test_cheapest_hours_add_flexible_sequential(
         coordinator=_setup_coordinator_mock(),
     )
     await sensor.async_update()
-    attributes = sensor.extra_state_attributes
+    attributes = _attrs(sensor)
 
     # A generous price limit grows the block over the whole 18-23 window.
     assert len(attributes["list"]) == 1
@@ -2359,11 +2440,13 @@ async def test_skip_calculation_when_today_only(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory, hass_tz_info
 ) -> None:
     """Test if calculations are being skipped if only prices of 'today' are available."""
-    _setup_nordpool_official_mock(
+    _setup_nordpool_official_mock_by_date(
         hass,
-        "nordpool_official_service_15min_yesterday.json",
-        "nordpool_official_service_15min_today.json",
-        "nordpool_official_service_empty.json",
+        {
+            "2025-03-13": "nordpool_official_service_15min_yesterday.json",
+            "2025-03-14": "nordpool_official_service_15min_today.json",
+            "2025-03-15": "nordpool_official_service_empty.json",
+        },
     )
     freezer.move_to("2025-03-14 10:00+03:00")
 
@@ -2394,11 +2477,48 @@ async def test_skip_calculation_when_today_only(
     freezer.move_to("2025-03-14 10:15+03:00")
 
     with patch(
-        "custom_components.aio_energy_management.binary_sensor.calculate_non_sequential_cheapest_hours",
-        create=True,
+        "custom_components.aio_energy_management.cheapest_hours.binary_sensor.calculate_non_sequential_cheapest_hours",
+        wraps=calculate_non_sequential_cheapest_hours,
     ) as mock_calc:
         # Second run:
         await sensor.async_update()
 
         # Verification: mock_calc must not have been called.
         mock_calc.assert_not_called()
+
+
+async def test_price_attributes_used_by_templates(hass: HomeAssistant) -> None:
+    """Lock the attribute shape that user templates read.
+
+    Today's mean price is a top-level attribute; tomorrow's pending calculation
+    is exposed as 'next' with its prices under 'extra'.
+    """
+    sensor = _make_sensor(hass)
+    start = datetime(2026, 11, 5, 2, 0, tzinfo=dt_util.get_default_time_zone())
+    slot: list[TimeSlot] = [{"start": start, "end": start.replace(hour=5)}]
+    sensor._set_list(
+        slot,
+        start.replace(hour=23),
+        {"mean_price": 10.0, "max_price": 12.0, "min_price": 8.0},
+    )
+    sensor._set_next(
+        [{"start": start.replace(day=6), "end": start.replace(day=6, hour=5)}],
+        start.replace(day=6, hour=23),
+        {"mean_price": 20.0, "max_price": 22.0, "min_price": 18.0},
+    )
+
+    attributes = _attrs(sensor)
+
+    assert attributes["mean_price"] == 10.0
+    assert attributes["max_price"] == 12.0
+    assert attributes["min_price"] == 8.0
+    assert "extra" not in attributes
+    assert attributes["list"] == slot
+    assert attributes["next"]["extra"]["mean_price"] == 20.0
+    assert attributes["next"]["list"][0]["start"] == start.replace(day=6)
+    # Reading the attributes must not change the stored data.
+    assert sensor._data.get("extra") == {
+        "mean_price": 10.0,
+        "max_price": 12.0,
+        "min_price": 8.0,
+    }

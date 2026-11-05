@@ -1,5 +1,6 @@
 {
   "name": "AIO Energy Management",
   "render_readme": true,
-  "iot_class": "calculated"
+  "iot_class": "calculated",
+  "homeassistant": "2026.9.0"
 }

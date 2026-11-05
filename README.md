@@ -337,8 +337,8 @@ Will clear stored data for specified cheapest hours configuration. Changes will 
 |------------------|----------------|
 | unique_id        | unique_id of the item to be cleared. Unique_id should be the same as defined in cheapest_hours configuration entry. |
 
-### Action: Reload integration (aio_energy_management.reload_data)
-Will reload whole configuration without needing to restart the whole Home Assistant. Remember to call aio_energy_management.clear_data after changes if needed.
+### Action: Reload YAML configuration (aio_energy_management.reload)
+Reloads the `aio_energy_management:` configuration from configuration.yaml without restarting Home Assistant. Entries configured through the UI are not affected; reload those from Settings → Devices & Services. Remember to call aio_energy_management.clear_data after changes if needed.
 
 ### Example service call
 ```
@@ -346,6 +346,12 @@ service: aio_energy_management.clear_data
 data:
   unique_id: my_cheapest_hours
 ```
+
+## Removing the integration
+1. **Entries configured through the UI:** go to Settings → Devices & Services → AIO Energy Management and delete each entry (cheapest hours sensors, excess solar and Global Settings).
+2. **YAML configuration:** remove the `aio_energy_management:` block from configuration.yaml.
+3. **The integration itself:** remove it in HACS (or delete `custom_components/aio_energy_management` for a manual installation) and restart Home Assistant.
+4. **Optional:** delete `.storage/aio_energy_management.storage` from your configuration directory to remove the stored cheapest hours and calendar data.
 
 ## Full example with Nord Pool cheapest hours, expensive hours and a calendar
 ```

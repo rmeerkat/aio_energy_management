@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 from collections.abc import Callable
-from typing import Any
-import voluptuous as vol
+import probatio as vol
 
 from homeassistant.config_entries import ConfigFlowResult
+
+from ..flow_types import FlowInput, FlowMixinBase, as_int, as_number
 
 from custom_components.aio_energy_management.const import (
     CONF_ADD_FLEXIBLE,
@@ -15,7 +17,6 @@ from custom_components.aio_energy_management.const import (
     CONF_END_HOURS_ENTITY,
     CONF_END_MINUTES_ENTITY,
     CONF_FAILSAFE_STARTING_HOUR,
-    CONF_FLEXIBLE_PRICE_LIMIT_ENTITY,
     CONF_MAX_NUMBER_OF_SLOTS,
     CONF_MAX_NUMBER_OF_SLOTS_ENTITY,
     CONF_MIN_SEQ_SLOTS,
@@ -72,30 +73,32 @@ CONF_ENTRY_TYPE = "entry_type"
 ENTRY_TYPE_CHEAPEST_HOURS = "cheapest_hours"
 
 
-class CheapestHoursConfigFlowMixin:
+class CheapestHoursConfigFlowMixin(FlowMixinBase):
     """Mixin for cheapest hours config flow steps."""
 
-    def _save_options_entry(self, user_input: dict[str, Any]) -> ConfigFlowResult:
+    _data_provider_type: str | None
+
+    def _save_options_entry(self, user_input: FlowInput) -> ConfigFlowResult:
         """Helper to save updated data directly during Options Flow."""
+        entry = self._require_options_entry()
         cleaned_input = sanitize_cheapest_hours_input(user_input)
 
-        new_data = {
-            **self._config_entry.data,
-            **cleaned_input,
-        }
+        new_data = {**entry.data, **cleaned_input}
+        name = new_data.get(CONF_NAME)
         self.hass.config_entries.async_update_entry(
-            self._config_entry,
-            title=new_data.get(CONF_NAME, self._config_entry.title),
+            entry,
+            title=name if isinstance(name, str) else entry.title,
             data=new_data,
         )
         return self.async_create_entry(title="", data={})
 
     async def async_step_cheapest_hours_data_provider(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Select data provider type for cheapest hours."""
         if user_input is not None:
-            self._data_provider_type = user_input[CONF_DATA_PROVIDER_TYPE]
+            provider = user_input.get(CONF_DATA_PROVIDER_TYPE)
+            self._data_provider_type = provider if isinstance(provider, str) else None
             self._config_data[CONF_DATA_PROVIDER_TYPE] = self._data_provider_type
 
             if self._data_provider_type == DATA_PROVIDER_NORDPOOL:
@@ -108,8 +111,8 @@ class CheapestHoursConfigFlowMixin:
                 return await self.async_step_cheapest_hours_stromligning()
 
         default = None
-        if hasattr(self, "_config_entry"):
-            default = self._config_entry.data.get(CONF_DATA_PROVIDER_TYPE)
+        if (entry := self._options_entry()) is not None:
+            default = entry.data.get(CONF_DATA_PROVIDER_TYPE)
 
         return self.async_show_form(
             step_id="cheapest_hours_data_provider",
@@ -119,24 +122,23 @@ class CheapestHoursConfigFlowMixin:
     async def _async_handle_price_source_step(
         self,
         step_id: str,
-        schema_factory: Callable[[dict[str, Any] | None], vol.Schema],
-        user_input: dict[str, Any] | None = None,
+        schema_factory: Callable[[FlowInput | None], vol.Schema],
+        user_input: FlowInput | None = None,
     ) -> ConfigFlowResult:
         """Generic handler for price source provider configuration steps."""
         if user_input is not None:
             coerce_mtu(user_input)
 
             # Options Flow: Save entry directly
-            if hasattr(self, "_config_entry"):
+            if self._options_entry() is not None:
                 return self._save_options_entry(user_input)
 
             # Config Flow: forward towards basic settings
             self._config_data.update(user_input)
             return await self.async_step_cheapest_hours_basic()
 
-        existing_data = None
-        if hasattr(self, "_config_entry"):
-            existing_data = dict(self._config_entry.data)
+        entry = self._options_entry()
+        existing_data = dict(entry.data) if entry is not None else None
 
         return self.async_show_form(
             step_id=step_id,
@@ -144,7 +146,7 @@ class CheapestHoursConfigFlowMixin:
         )
 
     async def async_step_cheapest_hours_nordpool(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Configure Nord Pool entity for cheapest hours."""
         return await self._async_handle_price_source_step(
@@ -154,7 +156,7 @@ class CheapestHoursConfigFlowMixin:
         )
 
     async def async_step_cheapest_hours_nordpool_official(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Configure Nord Pool official config entry for cheapest hours."""
         return await self._async_handle_price_source_step(
@@ -164,7 +166,7 @@ class CheapestHoursConfigFlowMixin:
         )
 
     async def async_step_cheapest_hours_entsoe(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Configure Entso-E entity for cheapest hours."""
         return await self._async_handle_price_source_step(
@@ -174,7 +176,7 @@ class CheapestHoursConfigFlowMixin:
         )
 
     async def async_step_cheapest_hours_stromligning(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Configure Strømligning entities for cheapest hours."""
         return await self._async_handle_price_source_step(
@@ -184,7 +186,7 @@ class CheapestHoursConfigFlowMixin:
         )
 
     async def async_step_cheapest_hours_basic(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Configure basic cheapest hours settings."""
 
@@ -192,17 +194,14 @@ class CheapestHoursConfigFlowMixin:
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            if "dynamic_section" in user_input and isinstance(
-                user_input["dynamic_section"], dict
-            ):
-                user_input.update(user_input.pop("dynamic_section"))
+            self._flatten_dynamic_section(user_input)
             errors = validate_basic_integer_fields(user_input)
             slot_errors = validate_and_clean_number_of_slots(user_input)
             errors.update(slot_errors)
 
             if not errors:
                 # Options flow
-                if hasattr(self, "_config_entry"):
+                if self._options_entry() is not None:
                     normalize_optional_keys(
                         user_input,
                         [CONF_NUMBER_OF_SLOTS, CONF_NUMBER_OF_SLOTS_ENTITY],
@@ -213,25 +212,19 @@ class CheapestHoursConfigFlowMixin:
                 # Config flow
                 self._config_data.update(user_input)
 
-                unique_id = self._config_data[CONF_NAME].lower().replace(" ", "_")
+                name = str(self._config_data[CONF_NAME])
+                unique_id = name.lower().replace(" ", "_")
                 self._config_data[CONF_UNIQUE_ID] = unique_id
                 self._config_data[CONF_ENTRY_TYPE] = ENTRY_TYPE_CHEAPEST_HOURS
                 cleaned_data = sanitize_cheapest_hours_input(self._config_data)
 
-                await self.async_set_unique_id(unique_id)
-                self._abort_if_unique_id_configured()
-
-                return self.async_create_entry(
-                    title=cleaned_data[CONF_NAME],
-                    data=cleaned_data,
+                return await self._async_create_unique_entry(
+                    unique_id, name, cleaned_data
                 )
 
         # Show form
-        existing_data = None
-        if hasattr(self, "_config_entry"):
-            existing_data = dict(self._config_entry.data)
-
-        merged_input = {**(existing_data or {}), **(user_input or {})}
+        entry = self._options_entry()
+        merged_input = {**(entry.data if entry else {}), **(user_input or {})}
 
         return self.async_show_form(
             step_id="cheapest_hours_basic",
@@ -240,24 +233,20 @@ class CheapestHoursConfigFlowMixin:
         )
 
     async def async_step_cheapest_hours_advanced(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Configure advanced cheapest hours settings (Options Flow only)."""
 
         # Validate and process form input
         errors: dict[str, str] = {}
-        entry_data = dict(self._config_entry.data)
-        sequential = entry_data.get(CONF_SEQUENTIAL, False)
+        entry_data = self._entry_data()
+        sequential = entry_data.get(CONF_SEQUENTIAL) is True
 
         if user_input is not None:
-            if "dynamic_section" in user_input and isinstance(
-                user_input["dynamic_section"], dict
-            ):
-                user_input.update(user_input.pop("dynamic_section"))
+            self._flatten_dynamic_section(user_input)
             errors = validate_and_clean_advanced_fields(
                 user_input,
                 sequential=sequential,
-                mtu=entry_data.get(CONF_MTU) or 60,
                 config_data=self._config_data,
             )
 
@@ -288,7 +277,7 @@ class CheapestHoursConfigFlowMixin:
         )
 
     async def async_step_cheapest_hours_offset(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Configure offset settings for cheapest hours (Options Flow only)."""
 
@@ -296,10 +285,7 @@ class CheapestHoursConfigFlowMixin:
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            if "dynamic_section" in user_input and isinstance(
-                user_input["dynamic_section"], dict
-            ):
-                user_input.update(user_input.pop("dynamic_section"))
+            self._flatten_dynamic_section(user_input)
 
             errors = validate_offset_integer_fields(user_input)
             offset_errors = validate_and_clean_offset_fields(user_input)
@@ -318,9 +304,11 @@ class CheapestHoursConfigFlowMixin:
                 }
                 return self._save_options_entry(save_data)
 
-        offset_data = {
-            **(self._config_entry.data.get(CONF_OFFSET) or {}),
-            **self._config_entry.data,
+        entry_data = self._entry_data()
+        stored_offset = entry_data.get(CONF_OFFSET)
+        offset_data: FlowInput = {
+            **(cast(FlowInput, stored_offset) if isinstance(stored_offset, dict) else {}),
+            **entry_data,
         }
         merged_input = {**offset_data, **(user_input or {})}
 
@@ -331,23 +319,20 @@ class CheapestHoursConfigFlowMixin:
         )
 
     async def async_step_cheapest_hours_flexible(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Configure flexible slot settings for cheapest hours (Options Flow only)."""
 
         errors: dict[str, str] = {}
-        entry_data = dict(self._config_entry.data)
+        entry_data = self._entry_data()
 
         if user_input is not None:
-            if "dynamic_section" in user_input and isinstance(
-                user_input["dynamic_section"], dict
-            ):
-                user_input.update(user_input.pop("dynamic_section"))
+            self._flatten_dynamic_section(user_input)
 
             errors = validate_and_build_add_flexible(
                 user_input,
-                mtu=entry_data.get(CONF_MTU) or 60,
-                stored_price_limit=entry_data.get(CONF_PRICE_LIMIT),
+                mtu=as_int(entry_data.get(CONF_MTU)) or 60,
+                stored_price_limit=as_number(entry_data.get(CONF_PRICE_LIMIT)),
             )
 
             if not errors:

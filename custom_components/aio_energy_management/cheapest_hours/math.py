@@ -1,15 +1,19 @@
 """Math functions for cheapest hours."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 import math
-
-import numpy as np
 
 import homeassistant.util.dt as dt_util
 
 from ..enums import HourPriceType
 from ..exceptions import InvalidInput, ValueNotFound
+from ..models.cheapest_hours_data import (
+    CalculationResult,
+    PricedSlot,
+    PriceExtra,
+    TimeSlot,
+)
 from ..models.hour_price import HourPrice
 
 _LOGGER = logging.getLogger(__name__)
@@ -23,8 +27,8 @@ PRICE_DELTA_TOLERANCE = 1e-9
 
 
 def calculate_sequential_cheapest_hours(
-    today: list,
-    tomorrow: list,
+    today: list[HourPrice],
+    tomorrow: list[HourPrice] | None,
     number_of_slots: int,
     starting_today: bool,
     first_hour: int,
@@ -35,7 +39,7 @@ def calculate_sequential_cheapest_hours(
     max_number_of_slots: int | None = None,
     flexible_price_limit: float | None = None,
     max_price_delta: float | None = None,
-) -> (dict, bool):
+) -> tuple[CalculationResult, bool]:
     """Calculate sequential cheapest hours.
 
     When ``max_number_of_slots`` and ``flexible_price_limit`` (or
@@ -61,9 +65,6 @@ def calculate_sequential_cheapest_hours(
         _LOGGER.error("Invalid configuration for sequential cheapest hours sensor")
         raise InvalidInput
 
-    fd: dict = {}  # Final data dictionary
-    fd["extra"] = {}
-
     # Check daylight savings & TODAY is mandatory
     td = _check_day_light_savings(today, mtu=mtu)
     if not _is_valid_data_length(td, mtu):
@@ -74,7 +75,7 @@ def calculate_sequential_cheapest_hours(
 
     # TOMORROW is optional
     has_tomorrow = False
-    tm = []
+    tm: list[HourPrice] = []
     if tomorrow:
         try:
             # Check daylight savings
@@ -96,7 +97,6 @@ def calculate_sequential_cheapest_hours(
         cheapest_price = MIN_PRICE_VALUE
 
     best_start = 0
-    counter = 0.00
 
     starting = first_hour
     if not starting_today and has_tomorrow:
@@ -150,11 +150,11 @@ def calculate_sequential_cheapest_hours(
         (not inversed and mean_price > price_limit)
         or (inversed and mean_price < price_limit)
     ):
-        fd["list"] = []
-        fd["extra"]["mean_price"] = None
-        fd["extra"]["max_price"] = None
-        fd["extra"]["min_price"] = None
-        return (fd, not has_tomorrow)
+        empty: CalculationResult = {
+            "list": [],
+            "extra": {"mean_price": None, "max_price": None, "min_price": None},
+        }
+        return (empty, not has_tomorrow)
 
     best_end = best_start + number_of_slots
 
@@ -188,12 +188,15 @@ def calculate_sequential_cheapest_hours(
     block = prices[best_start:best_end]
     slot = timedelta(minutes=mtu)
     cheapest_hour = dt_util.start_of_local_day() + slot * best_start
-    fd["list"] = [{"start": cheapest_hour, "end": cheapest_hour + slot * len(block)}]
-
-    fd["extra"]["mean_price"] = sum(block) / len(block)
-    fd["extra"]["max_price"] = max(block)
-    fd["extra"]["min_price"] = min(block)
-    return (fd, not has_tomorrow)
+    result: CalculationResult = {
+        "list": [{"start": cheapest_hour, "end": cheapest_hour + slot * len(block)}],
+        "extra": {
+            "mean_price": sum(block) / len(block),
+            "max_price": max(block),
+            "min_price": min(block),
+        },
+    }
+    return (result, not has_tomorrow)
 
 
 def _extend_sequential_block(
@@ -213,7 +216,7 @@ def _extend_sequential_block(
     """
     mult = -1 if inversed else 1
     for _ in range(max_extra):
-        candidates = []
+        candidates: list[tuple[float, int]] = []
         if start > window_start:
             candidates.append((prices[start - 1] * mult, 0))
         if end < window_end:
@@ -254,8 +257,8 @@ def _get_flexible_limit(
 
 
 def calculate_non_sequential_cheapest_hours(
-    today: list,
-    tomorrow: list,
+    today: list[HourPrice],
+    tomorrow: list[HourPrice] | None,
     number_of_slots: int,
     starting_today: bool,
     first_hour: int,
@@ -268,7 +271,7 @@ def calculate_non_sequential_cheapest_hours(
     min_seq_slots: int = 1,  # defaults to 1 for backwards compatibility
     number_of_blocks: int | None = None,
     max_price_delta: float | None = None,
-) -> (dict, bool):
+) -> tuple[CalculationResult, bool]:
     """Calculate non-sequential cheapest hours.
 
     When ``max_number_of_slots`` and ``flexible_price_limit`` are both provided,
@@ -308,7 +311,7 @@ def calculate_non_sequential_cheapest_hours(
 
     # TOMORROW is optional
     has_tomorrow = False
-    tm = []
+    tm: list[HourPrice] = []
     if tomorrow:
         try:
             tm_temp = _check_day_light_savings(tomorrow, mtu=mtu)
@@ -320,7 +323,7 @@ def calculate_non_sequential_cheapest_hours(
                 "Tomorrow's data is invalid or empty. Proceeding with today's data only"
             )
 
-    arr = [
+    arr: list[PricedSlot] = [
         {
             "price": item.value,
             "start": item.start,
@@ -354,9 +357,7 @@ def calculate_non_sequential_cheapest_hours(
         )
         raise ValueNotFound
 
-    data = []
-    fd: dict = {}  # Final data dictionary
-    fd["extra"] = {}
+    data: list[PricedSlot] = []
 
     # TODO: This could be refactored to use less code duplication.
     # arr contains all necessary data already, just need to take first_hour and last_hour into account
@@ -364,12 +365,12 @@ def calculate_non_sequential_cheapest_hours(
         for i in range(starting * 4, ending * 4):
             start = dt_util.start_of_local_day() + timedelta(minutes=i * 15)
             end = dt_util.start_of_local_day() + timedelta(minutes=(i + 1) * 15)
-            data += [{"start": start, "end": end, "price": arr[i]["price"]}]
+            data.append({"start": start, "end": end, "price": arr[i]["price"]})
     else:
         for i in range(starting, ending):
             start = dt_util.start_of_local_day() + timedelta(hours=i)
             end = dt_util.start_of_local_day() + timedelta(hours=i + 1)
-            data += [{"start": start, "end": end, "price": arr[i]["price"]}]
+            data.append({"start": start, "end": end, "price": arr[i]["price"]})
 
     # Save all available slots unsorted --> replaced data.sort(key=lambda x: (x["price"], x["start"], x["end"]), reverse=inversed)
     all_window_slots = list(data)
@@ -438,56 +439,34 @@ def calculate_non_sequential_cheapest_hours(
 
     data.sort(key=lambda x: x["start"])
 
-    fd["extra"]["mean_price"] = _get_average(data)
-    fd["extra"]["max_price"] = _get_max(data)
-    fd["extra"]["min_price"] = _get_min(data)
+    extra: PriceExtra = {
+        "mean_price": _get_average(data),
+        "max_price": _get_max(data),
+        "min_price": _get_min(data),
+    }
+    result: CalculationResult = {"list": _merge_adjacent_slots(data), "extra": extra}
+    return (result, not has_tomorrow)
 
-    # Combine sequential slots
-    iterate = True
-    while iterate is True:
-        matched = False
-        i = 0
-        result = []
 
-        while i < np.size(data):
-            current_item = data[i]
-            next_item = None
-            if i < np.size(data) - 1:
-                next_item = data[i + 1]
-
-            if next_item is not None:
-                if current_item["end"] == next_item["start"]:
-                    # Match, combine these two
-                    d = {"start": current_item["start"], "end": next_item["end"]}
-                    i += 1  # skip next
-                    matched = True
-                    result += [d]
-                else:
-                    # No match, just set the single item
-                    d = {"start": current_item["start"], "end": current_item["end"]}
-                    result += [d]
-            else:
-                d = {"start": current_item["start"], "end": current_item["end"]}
-                result += [d]
-
-            i += 1  # Increase loop index
-
-        data = result
-        if not matched:
-            iterate = False
-
-    fd["list"] = data
-    return (fd, not has_tomorrow)
+def _merge_adjacent_slots(data: list[PricedSlot]) -> list[TimeSlot]:
+    """Merge slots (sorted by start) where one ends exactly when the next starts."""
+    merged: list[TimeSlot] = []
+    for item in data:
+        if merged and merged[-1]["end"] == item["start"]:
+            merged[-1]["end"] = item["end"]
+        else:
+            merged.append({"start": item["start"], "end": item["end"]})
+    return merged
 
 
 def _select_flexible_slots(
-    all_slots: list[dict],
-    base_slots_or_count: list[dict] | int,
+    all_slots: list[PricedSlot],
+    base_slots_or_count: list[PricedSlot] | int,
     max_number_of_slots: int | None,
     flexible_price_limit: float | None,
     inversed: bool,
     max_price_delta: float | None = None,
-) -> list[dict]:
+) -> list[PricedSlot]:
     """Select base slots and optionally extend them with flexible slots.
 
     The base ``number_of_slots`` slots are always selected (the caller applies the
@@ -565,12 +544,12 @@ def _would_exceed_max_seq(
 
 
 def _select_slots_with_min_seq_slot_size(
-    data: list[dict],
+    data: list[PricedSlot],
     number_of_slots: int,
     min_seq_slots: int = 1,
     max_seq_slots: int | None = None,
     inversed: bool = False,
-) -> list[dict]:
+) -> list[PricedSlot]:
     """Select base slots with min_seq_slots, max_seq_slots, and inversed logic."""
 
     # IF min_seq_slots == 1: keep original behavior
@@ -654,20 +633,20 @@ def _select_slots_with_min_seq_slot_size(
     return [data[i] for i in sorted(selected_indices)]
 
 
-def _get_average(data: list) -> float | None:
+def _get_average(data: list[PricedSlot]) -> float | None:
     if len(data) == 0:
         return None
     total = sum(item["price"] for item in data)
     return total / len(data)
 
 
-def _get_max(data: list) -> float | None:
+def _get_max(data: list[PricedSlot]) -> float | None:
     if len(data) == 0:
         return None
     return max(item["price"] for item in data)
 
 
-def _get_min(data: list) -> float | None:
+def _get_min(data: list[PricedSlot]) -> float | None:
     if len(data) == 0:
         return None
     return min(item["price"] for item in data)
@@ -697,8 +676,8 @@ def _is_cheapest_hours_input_valid(
 
 
 def _check_day_light_savings(
-    hours: list, inversed: bool = False, mtu: int = 60
-) -> list:
+    hours: list[HourPrice], inversed: bool = False, mtu: int = 60
+) -> list[HourPrice]:
     # mtu 15: two DST scenarios exist for 15-min data with 92 items:
     # 1. Data has a UTC gap (e.g. 03:00-03:45 UTC missing) → _add_missing_hour
     #    detects it and inserts 4 items at the correct position.
@@ -737,7 +716,7 @@ def _check_day_light_savings(
     return hours
 
 
-def _is_valid_data_length(hours: list, mtu: int) -> bool:
+def _is_valid_data_length(hours: list[HourPrice], mtu: int) -> bool:
     if mtu == 15:
         if len(hours) != 96:
             return False
@@ -746,12 +725,13 @@ def _is_valid_data_length(hours: list, mtu: int) -> bool:
     return True
 
 
-def _add_missing_hour(hours: list, inversed: bool, mtu: int = 60) -> list:
+def _add_missing_hour(
+    hours: list[HourPrice], inversed: bool, mtu: int = 60
+) -> list[HourPrice]:
     """Add missing hour when turning to summer time. The new hour added has the value of max or min depending of inversed state."""
     # Find the missing entry's index by checking time difference.
 
-    missing_indexes = []
-    # missing_index = -1
+    missing_indexes: list[int] = []
     for i in range(len(hours) - 1):
         time_diff = hours[i + 1].start - hours[i].start
         time_diff_hours = time_diff.total_seconds() / 3600.0
@@ -792,8 +772,8 @@ def _add_missing_hour(hours: list, inversed: bool, mtu: int = 60) -> list:
 
 
 def _insert_at_local_dst_gap(
-    hours: list, count: int, inversed: bool, mtu: int = 15
-) -> list:
+    hours: list[HourPrice], count: int, inversed: bool, mtu: int = 15
+) -> list[HourPrice]:
     """Insert synthetic slots at the DST spring-forward gap in local wall-clock time.
 
     Used for NORDPOOL_OFFICIAL data where consecutive UTC entries at a DST
@@ -828,10 +808,10 @@ def _insert_at_local_dst_gap(
     return hours
 
 
-def _remove_duplicate_starts(hours: list) -> list:
+def _remove_duplicate_starts(hours: list[HourPrice]) -> list[HourPrice]:
     """Remove duplicate hour when turning to winter time. Hour removed is the latter item."""
-    seen_starts = set()
-    result = []
+    seen_starts: set[datetime] = set()
+    result: list[HourPrice] = []
 
     for item in hours:
         # Official prices have distinct UTC instants for the repeated local hour.

@@ -12,12 +12,16 @@ Both switches use ``RestoreEntity`` so their state survives HA restarts.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import override, TYPE_CHECKING
 
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .manager import ExcessSolarManager
+
+if TYPE_CHECKING:
+    from ..entity import EntityDeviceInfo
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,14 +37,32 @@ class ExcessSolarMasterSwitch(RestoreEntity, SwitchEntity):
     across reboots.
     """
 
-    def __init__(self, manager: ExcessSolarManager, unique_id: str, name: str) -> None:
+    _attr_has_entity_name: bool = True
+    _attr_device_info: EntityDeviceInfo
+
+    _manager: ExcessSolarManager
+    _attr_unique_id: str | None
+    _attr_name: str | None
+    _attr_icon: str | None
+    _attr_is_on: bool | None
+
+    def __init__(
+        self,
+        manager: ExcessSolarManager,
+        unique_id: str,
+        name: str,
+        device_info: DeviceInfo | None = None,
+    ) -> None:
         """Initialise the master switch."""
         self._manager = manager
         self._attr_unique_id = unique_id
-        self._attr_name = name
+        # With a device the master switch is its device's main entity.
+        self._attr_name = None if device_info is not None else name
+        self._attr_device_info = device_info
         self._attr_icon = "mdi:solar-power"
         self._attr_is_on = True  # enabled by default
 
+    @override
     async def async_added_to_hass(self) -> None:
         """Restore state from the last known state on startup."""
         await super().async_added_to_hass()
@@ -62,17 +84,20 @@ class ExcessSolarMasterSwitch(RestoreEntity, SwitchEntity):
             )
 
     @property
-    def is_on(self) -> bool:
+    @override
+    def is_on(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Return True if the manager is enabled."""
-        return self._manager._enabled
+        return self._manager.enabled
 
-    async def async_turn_on(self, **kwargs: Any) -> None:
+    @override
+    async def async_turn_on(self, **_kwargs: object) -> None:
         """Enable the excess solar manager."""
         self._manager.async_enable()
         self.async_write_ha_state()
         _LOGGER.info("Excess Solar master switch turned ON")
 
-    async def async_turn_off(self, **kwargs: Any) -> None:
+    @override
+    async def async_turn_off(self, **_kwargs: object) -> None:
         """Disable the excess solar manager and deactivate all sensors."""
         await self._manager.async_disable()
         self.async_write_ha_state()
@@ -89,13 +114,25 @@ class ExcessSolarDeviceEnabledSwitch(RestoreEntity, SwitchEntity):
     across reboots.
     """
 
-    def __init__(self, unique_id: str, name: str) -> None:
+    _attr_has_entity_name: bool = True
+    _attr_device_info: EntityDeviceInfo
+
+    _attr_unique_id: str | None
+    _attr_name: str | None
+    _attr_icon: str | None
+    _attr_is_on: bool | None
+
+    def __init__(
+        self, unique_id: str, name: str, device_info: DeviceInfo | None = None
+    ) -> None:
         """Initialise the device enabled switch."""
         self._attr_unique_id = unique_id
         self._attr_name = name
+        self._attr_device_info = device_info
         self._attr_icon = "mdi:solar-power-variant"
-        self._attr_is_on: bool = True  # enabled by default
+        self._attr_is_on = True  # enabled by default
 
+    @override
     async def async_added_to_hass(self) -> None:
         """Restore previous state on startup."""
         await super().async_added_to_hass()
@@ -108,18 +145,15 @@ class ExcessSolarDeviceEnabledSwitch(RestoreEntity, SwitchEntity):
                 "ON" if self._attr_is_on else "OFF",
             )
 
-    @property
-    def is_on(self) -> bool:
-        """Return True if this device participates in solar management."""
-        return bool(self._attr_is_on)
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
+    @override
+    async def async_turn_on(self, **_kwargs: object) -> None:
         """Enable this device for solar management."""
         self._attr_is_on = True
         self.async_write_ha_state()
         _LOGGER.debug("Device enabled switch '%s' turned ON", self.name)
 
-    async def async_turn_off(self, **kwargs: Any) -> None:
+    @override
+    async def async_turn_off(self, **_kwargs: object) -> None:
         """Disable this device from solar management."""
         self._attr_is_on = False
         self.async_write_ha_state()

@@ -20,6 +20,7 @@ from aio_energy_management.cheapest_hours.helpers import (
 )
 from aio_energy_management.cheapest_hours.schemas import get_flexible_schema
 from aio_energy_management.config_flow import AIOEnergyManagementOptionsFlow
+from aio_energy_management.flow_types import FlowInput
 from aio_energy_management.const import (
     CONF_ADD_FLEXIBLE,
     CONF_END,
@@ -48,7 +49,9 @@ from aio_energy_management.const import (
 class TestValidateBasicIntegerFields:
     """Tests for _validate_basic_integer_fields."""
 
-    def _make_input(self, first_hour=0, last_hour=23, number_of_slots=1):
+    def _make_input(
+        self, first_hour: int = 0, last_hour: int = 23, number_of_slots: int = 1
+    ) -> FlowInput:
         return {
             CONF_FIRST_HOUR: first_hour,
             CONF_LAST_HOUR: last_hour,
@@ -222,8 +225,8 @@ class TestValidateAdvancedIntegerFields:
 class TestValidateOffsetIntegerFields:
     """Tests for validate_offset_integer_fields."""
 
-    START_MINUTES = f"{CONF_START}_{CONF_MINUTES}"
-    END_MINUTES = f"{CONF_END}_{CONF_MINUTES}"
+    START_MINUTES: str = f"{CONF_START}_{CONF_MINUTES}"
+    END_MINUTES: str = f"{CONF_END}_{CONF_MINUTES}"
 
     # --- valid cases ---
 
@@ -288,7 +291,7 @@ class TestValidateAndBuildAddFlexible:
     """Tests for validate_and_build_add_flexible."""
 
     def test_valid_static_builds_nested_dict(self):
-        user_input = {
+        user_input: FlowInput = {
             CONF_MAX_NUMBER_OF_SLOTS: 21,
             CONF_FLEXIBLE_PRICE_LIMIT: 0.05,
         }
@@ -303,7 +306,7 @@ class TestValidateAndBuildAddFlexible:
         assert CONF_FLEXIBLE_PRICE_LIMIT not in user_input
 
     def test_valid_entities_build_nested_dict(self):
-        user_input = {
+        user_input: FlowInput = {
             CONF_MAX_NUMBER_OF_SLOTS_ENTITY: "input_number.max_slots",
             CONF_FLEXIBLE_PRICE_LIMIT_ENTITY: "input_number.flex_limit",
         }
@@ -315,23 +318,23 @@ class TestValidateAndBuildAddFlexible:
         }
 
     def test_empty_is_noop(self):
-        user_input = {}
+        user_input: FlowInput = {}
         errors = validate_and_build_add_flexible(user_input, 60)
         assert not errors
         assert CONF_ADD_FLEXIBLE not in user_input
 
     def test_only_max_is_incomplete(self):
-        user_input = {CONF_MAX_NUMBER_OF_SLOTS: 21}
+        user_input: FlowInput = {CONF_MAX_NUMBER_OF_SLOTS: 21}
         errors = validate_and_build_add_flexible(user_input, 60)
         assert errors.get("base") == "add_flexible_incomplete"
 
     def test_only_price_limit_is_incomplete(self):
-        user_input = {CONF_FLEXIBLE_PRICE_LIMIT: 0.05}
+        user_input: FlowInput = {CONF_FLEXIBLE_PRICE_LIMIT: 0.05}
         errors = validate_and_build_add_flexible(user_input, 60)
         assert errors.get("base") == "add_flexible_incomplete"
 
     def test_max_above_cap_60(self):
-        user_input = {
+        user_input: FlowInput = {
             CONF_MAX_NUMBER_OF_SLOTS: 25,
             CONF_FLEXIBLE_PRICE_LIMIT: 0.05,
         }
@@ -341,7 +344,7 @@ class TestValidateAndBuildAddFlexible:
         )
 
     def test_max_within_cap_15(self):
-        user_input = {
+        user_input: FlowInput = {
             CONF_MAX_NUMBER_OF_SLOTS: 90,
             CONF_FLEXIBLE_PRICE_LIMIT: 0.05,
         }
@@ -351,7 +354,7 @@ class TestValidateAndBuildAddFlexible:
     def test_max_smaller_than_number_of_slots_is_allowed(self):
         # A max_number_of_slots below number_of_slots is raised to
         # number_of_slots at calculation time, so it is not a config error.
-        user_input = {
+        user_input: FlowInput = {
             CONF_MAX_NUMBER_OF_SLOTS: 3,
             CONF_FLEXIBLE_PRICE_LIMIT: 0.05,
         }
@@ -359,7 +362,7 @@ class TestValidateAndBuildAddFlexible:
         assert not errors
 
     def test_both_max_static_and_entity(self):
-        user_input = {
+        user_input: FlowInput = {
             CONF_MAX_NUMBER_OF_SLOTS: 21,
             CONF_MAX_NUMBER_OF_SLOTS_ENTITY: "input_number.max_slots",
             CONF_FLEXIBLE_PRICE_LIMIT: 0.05,
@@ -368,7 +371,7 @@ class TestValidateAndBuildAddFlexible:
         assert errors.get("base") == "both_max_number_of_slots_configured"
 
     def test_flexible_price_limit_not_below_price_limit(self):
-        user_input = {
+        user_input: FlowInput = {
             CONF_MAX_NUMBER_OF_SLOTS: 21,
             CONF_FLEXIBLE_PRICE_LIMIT: 0.5,
             CONF_PRICE_LIMIT: 0.5,
@@ -380,7 +383,7 @@ class TestValidateAndBuildAddFlexible:
         )
 
     def test_flexible_price_limit_below_price_limit_is_valid(self):
-        user_input = {
+        user_input: FlowInput = {
             CONF_MAX_NUMBER_OF_SLOTS: 21,
             CONF_FLEXIBLE_PRICE_LIMIT: 0.4,
             CONF_PRICE_LIMIT: 0.5,
@@ -389,7 +392,7 @@ class TestValidateAndBuildAddFlexible:
         assert not errors
 
     def test_flexible_price_limit_not_guarded_without_price_limit(self):
-        user_input = {
+        user_input: FlowInput = {
             CONF_MAX_NUMBER_OF_SLOTS: 21,
             CONF_FLEXIBLE_PRICE_LIMIT: 0.5,
         }
@@ -402,8 +405,8 @@ class TestValidateAndBuildAddFlexible:
 # ---------------------------------------------------------------------------
 
 
-def _schema_field_names(schema) -> set:
-    fields = set()
+def _schema_field_names(schema) -> set[str]:
+    fields: set[str] = set()
     for key, value in schema.schema.items():
         field_name = getattr(key, "schema", key)
         fields.add(field_name)

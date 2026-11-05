@@ -2,6 +2,7 @@
 
 import os
 import sys
+from typing import cast
 
 # Allow importing the custom component without a full HA environment
 sys.path.insert(
@@ -12,6 +13,7 @@ sys.path.insert(
 from aio_energy_management.cheapest_hours.helpers import (  # noqa: E402
     sanitize_cheapest_hours_input,
 )
+from aio_energy_management.flow_types import FlowInput  # noqa: E402
 from aio_energy_management.const import (  # noqa: E402
     CONF_FAILSAFE_STARTING_HOUR,
     CONF_FIRST_HOUR,
@@ -37,7 +39,7 @@ class TestSanitizeCheapestHoursInput:
 
     def test_floats_coerced_to_ints_for_hour_and_slot_fields(self):
         """Float values coming from UI selectors should be converted to hard ints."""
-        raw_input = {
+        raw_input: FlowInput = {
             CONF_FIRST_HOUR: 0.0,
             CONF_LAST_HOUR: 23.0,
             CONF_NUMBER_OF_SLOTS: 4.0,
@@ -51,11 +53,11 @@ class TestSanitizeCheapestHoursInput:
 
         for key, expected_val in raw_input.items():
             assert isinstance(sanitized[key], int)
-            assert sanitized[key] == int(expected_val)
+            assert sanitized[key] == int(cast(float, expected_val))
 
     def test_price_limits_remain_floats(self):
         """Price limits must preserve float precision for decimals."""
-        raw_input = {
+        raw_input: FlowInput = {
             CONF_PRICE_LIMIT: 0.15,
             CONF_FLEXIBLE_PRICE_LIMIT: -0.05,
         }
@@ -69,7 +71,7 @@ class TestSanitizeCheapestHoursInput:
 
     def test_string_and_boolean_fields_unaffected(self):
         """Non-numeric fields should pass through unchanged."""
-        raw_input = {
+        raw_input: FlowInput = {
             CONF_NAME: "Cheapest Hours Test",
             CONF_SEQUENTIAL: True,
         }
@@ -81,7 +83,7 @@ class TestSanitizeCheapestHoursInput:
 
     def test_none_and_missing_keys_handled_safely(self):
         """None values or missing keys should not raise exceptions."""
-        raw_input = {
+        raw_input: FlowInput = {
             CONF_FIRST_HOUR: None,
             CONF_NUMBER_OF_SLOTS: 2,
         }
@@ -94,7 +96,7 @@ class TestSanitizeCheapestHoursInput:
 
     def test_non_convertible_values_handled_gracefully(self):
         """Invalid non-numeric values should fail silently without crashing."""
-        raw_input = {
+        raw_input: FlowInput = {
             CONF_FIRST_HOUR: "invalid_string",
         }
 

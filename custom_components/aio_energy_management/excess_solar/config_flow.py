@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
-from typing import Any
+from typing import cast
 
-import voluptuous as vol
+import probatio as vol
 
 from homeassistant.config_entries import ConfigFlowResult
-from homeassistant.helpers import selector
 import homeassistant.helpers.config_validation as cv
 
 from ..const import (
@@ -23,6 +23,17 @@ from ..const import (
     CONF_POWER_DEVICES,
     CONF_PRIORITY,
     CONF_UNIQUE_ID,
+)
+from ..flow_types import FlowInput, FlowMixinBase, SchemaDict
+from ..selectors import (
+    EntitySelector,
+    EntitySelectorConfig,
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,8 +50,35 @@ ACTION_ADD_DEVICE = "add_device"
 ACTION_REMOVE_DEVICES = "remove_devices"
 
 
+def _to_int(value: object, default: int = 0) -> int:
+    """Return a numeric form value (number or numeric string) as int."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _device_list(value: object) -> list[FlowInput]:
+    """Return the power devices stored in config data."""
+    if not isinstance(value, list):
+        return []
+    return [
+        cast(FlowInput, device)
+        for device in cast(list[object], value)
+        if isinstance(device, dict)
+    ]
+
+
+def _device_name(device: Mapping[str, object]) -> str:
+    return str(device.get(CONF_NAME, ""))
+
+
 def _get_excess_solar_global_schema(
-    user_input: dict[str, Any] | None = None,
+    user_input: FlowInput | None = None,
 ) -> vol.Schema:
     """Get global excess solar configuration schema."""
     return vol.Schema(
@@ -56,17 +94,17 @@ def _get_excess_solar_global_schema(
                         user_input.get(CONF_GRID_POWER_SENSOR) if user_input else None
                     )
                 },
-            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+            ): EntitySelector(EntitySelectorConfig(domain="sensor")),
             vol.Optional(
                 CONF_BUFFER,
                 default=(user_input.get(CONF_BUFFER, 0) if user_input else 0),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
+            ): NumberSelector(
+                NumberSelectorConfig(
                     min=0,
                     max=10000,
                     step=10,
                     unit_of_measurement="W",
-                    mode=selector.NumberSelectorMode.BOX,
+                    mode=NumberSelectorMode.BOX,
                 )
             ),
         }
@@ -74,7 +112,7 @@ def _get_excess_solar_global_schema(
 
 
 def _get_excess_solar_edit_settings_schema(
-    entry_data: dict[str, Any],
+    entry_data: FlowInput,
 ) -> vol.Schema:
     """Get global excess solar edit settings schema prefilled from config entry."""
     return vol.Schema(
@@ -82,17 +120,17 @@ def _get_excess_solar_edit_settings_schema(
             vol.Required(
                 CONF_GRID_POWER_SENSOR,
                 description={"suggested_value": entry_data.get(CONF_GRID_POWER_SENSOR)},
-            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+            ): EntitySelector(EntitySelectorConfig(domain="sensor")),
             vol.Optional(
                 CONF_BUFFER,
-                default=int(entry_data.get(CONF_BUFFER, 0)),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
+                default=_to_int(entry_data.get(CONF_BUFFER)),
+            ): NumberSelector(
+                NumberSelectorConfig(
                     min=0,
                     max=10000,
                     step=10,
                     unit_of_measurement="W",
-                    mode=selector.NumberSelectorMode.BOX,
+                    mode=NumberSelectorMode.BOX,
                 )
             ),
         }
@@ -100,8 +138,8 @@ def _get_excess_solar_edit_settings_schema(
 
 
 def _build_device_schema_defaults(
-    user_input: dict[str, Any] | None,
-) -> dict[str, Any]:
+    user_input: FlowInput | None,
+) -> FlowInput:
     """Extract form defaults for the device schema from user_input or empty."""
     if not user_input:
         return {
@@ -123,78 +161,78 @@ def _build_device_schema_defaults(
 
     return {
         "name": user_input.get(CONF_NAME, ""),
-        "consumption": int(consumption) if consumption else 0,
+        "consumption": _to_int(consumption) if consumption else 0,
         "consumption_entity": consumption_entity,
-        "priority": int(user_input.get(CONF_PRIORITY, 100)),
+        "priority": _to_int(user_input.get(CONF_PRIORITY, 100), 100),
         "is_on_schedule": user_input.get(CONF_IS_ON_SCHEDULE),
-        "minimum_on_time": int(user_input.get(CONF_MINIMUM_ON_TIME, 0)),
+        "minimum_on_time": _to_int(user_input.get(CONF_MINIMUM_ON_TIME, 0)),
         "minimum_off_time": user_input.get(CONF_MINIMUM_OFF_TIME),
     }
 
 
 def _get_excess_solar_device_schema(
-    user_input: dict[str, Any] | None = None,
+    user_input: FlowInput | None = None,
 ) -> vol.Schema:
     """Get power device configuration schema."""
     d = _build_device_schema_defaults(user_input)
 
-    schema_dict: dict = {
+    schema_dict: SchemaDict = {
         vol.Required(CONF_NAME, default=d["name"]): cv.string,
         vol.Required(
             CONF_CONSUMPTION,
             default=d["consumption"],
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(
+        ): NumberSelector(
+            NumberSelectorConfig(
                 min=0,
                 max=100000,
                 step=10,
                 unit_of_measurement="W",
-                mode=selector.NumberSelectorMode.BOX,
+                mode=NumberSelectorMode.BOX,
             )
         ),
         vol.Optional(
             CONF_CONSUMPTION_ENTITY,
             description={"suggested_value": d["consumption_entity"]},
-        ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+        ): EntitySelector(EntitySelectorConfig(domain="sensor")),
         vol.Optional(
             CONF_PRIORITY,
             default=d["priority"],
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(
+        ): NumberSelector(
+            NumberSelectorConfig(
                 min=1,
                 max=999,
                 step=1,
-                mode=selector.NumberSelectorMode.BOX,
+                mode=NumberSelectorMode.BOX,
             )
         ),
         vol.Optional(
             CONF_IS_ON_SCHEDULE,
             description={"suggested_value": d["is_on_schedule"]},
-        ): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain=["binary_sensor", "input_boolean"])
+        ): EntitySelector(
+            EntitySelectorConfig(domain=["binary_sensor", "input_boolean"])
         ),
         vol.Optional(
             CONF_MINIMUM_ON_TIME,
             default=d["minimum_on_time"],
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(
+        ): NumberSelector(
+            NumberSelectorConfig(
                 min=0,
                 max=1440,
                 step=1,
                 unit_of_measurement="min",
-                mode=selector.NumberSelectorMode.BOX,
+                mode=NumberSelectorMode.BOX,
             )
         ),
         vol.Optional(
             CONF_MINIMUM_OFF_TIME,
             description={"suggested_value": d["minimum_off_time"]},
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(
+        ): NumberSelector(
+            NumberSelectorConfig(
                 min=0,
                 max=1440,
                 step=1,
                 unit_of_measurement="min",
-                mode=selector.NumberSelectorMode.BOX,
+                mode=NumberSelectorMode.BOX,
             )
         ),
     }
@@ -203,17 +241,18 @@ def _get_excess_solar_device_schema(
 
 
 def _process_device_input(
-    user_input: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, str]]:
+    user_input: FlowInput,
+) -> tuple[FlowInput, dict[str, str]]:
     """Validate and clean device user input.
 
     Returns:
         Tuple of (cleaned_device_dict, errors_dict).
     """
     errors: dict[str, str] = {}
-    device: dict[str, Any] = {}
+    device: FlowInput = {}
 
-    device[CONF_NAME] = user_input.get(CONF_NAME, "").strip()
+    name = user_input.get(CONF_NAME, "")
+    device[CONF_NAME] = name.strip() if isinstance(name, str) else ""
     if not device[CONF_NAME]:
         errors[CONF_NAME] = "device_name_required"
         return device, errors
@@ -221,42 +260,45 @@ def _process_device_input(
     consumption_watts = user_input.get(CONF_CONSUMPTION, 0)
     consumption_entity = user_input.get(CONF_CONSUMPTION_ENTITY)
 
-    device[CONF_CONSUMPTION] = int(consumption_watts) if consumption_watts else 0
+    device[CONF_CONSUMPTION] = _to_int(consumption_watts) if consumption_watts else 0
     if consumption_entity:
         device[CONF_CONSUMPTION_ENTITY] = consumption_entity
 
-    device[CONF_PRIORITY] = int(user_input.get(CONF_PRIORITY, 100))
-    device[CONF_MINIMUM_ON_TIME] = int(user_input.get(CONF_MINIMUM_ON_TIME, 0))
+    device[CONF_PRIORITY] = _to_int(user_input.get(CONF_PRIORITY, 100), 100)
+    device[CONF_MINIMUM_ON_TIME] = _to_int(user_input.get(CONF_MINIMUM_ON_TIME, 0))
 
-    for optional_key in [CONF_IS_ON_SCHEDULE]:
-        val = user_input.get(optional_key)
-        if val:
-            device[optional_key] = val
+    if is_on_schedule := user_input.get(CONF_IS_ON_SCHEDULE):
+        device[CONF_IS_ON_SCHEDULE] = is_on_schedule
 
     minimum_off_time = user_input.get(CONF_MINIMUM_OFF_TIME)
     if minimum_off_time is not None:
-        device[CONF_MINIMUM_OFF_TIME] = int(minimum_off_time)
+        device[CONF_MINIMUM_OFF_TIME] = _to_int(minimum_off_time)
 
     return device, errors
 
 
-class ExcessSolarConfigFlowMixin:
+class ExcessSolarConfigFlowMixin(FlowMixinBase):
     """Mixin providing excess solar config flow steps.
 
     Works for both the initial config flow and the options flow.
-    The options flow sets ``self._config_entry`` in its ``__init__``.
     """
+
+    def _power_devices(self) -> list[FlowInput]:
+        """Return the devices being configured, stored in the flow's config data."""
+        devices = _device_list(self._config_data.get(CONF_POWER_DEVICES))
+        self._config_data[CONF_POWER_DEVICES] = devices
+        return devices
 
     # ------------------------------------------------------------------
     # Initial config flow: global settings → device(s) → create entry
     # ------------------------------------------------------------------
 
     async def async_step_excess_solar_global(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Configure global excess solar settings (first step for new entries)."""
         if user_input is not None:
-            user_input[CONF_BUFFER] = int(user_input.get(CONF_BUFFER, 0))
+            user_input[CONF_BUFFER] = _to_int(user_input.get(CONF_BUFFER, 0))
             self._config_data.update(user_input)
             self._config_data[CONF_POWER_DEVICES] = []
             return await self.async_step_excess_solar_device()
@@ -267,7 +309,7 @@ class ExcessSolarConfigFlowMixin:
         )
 
     async def async_step_excess_solar_device(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Configure a power device to manage with excess solar."""
         errors: dict[str, str] = {}
@@ -275,12 +317,10 @@ class ExcessSolarConfigFlowMixin:
         if user_input is not None:
             device, errors = _process_device_input(user_input)
             if not errors:
-                if CONF_POWER_DEVICES not in self._config_data:
-                    self._config_data[CONF_POWER_DEVICES] = []
-                self._config_data[CONF_POWER_DEVICES].append(device)
+                self._power_devices().append(device)
                 return await self.async_step_excess_solar_another_device()
 
-        device_number = len(self._config_data.get(CONF_POWER_DEVICES, [])) + 1
+        device_number = len(self._power_devices()) + 1
         return self.async_show_form(
             step_id="excess_solar_device",
             data_schema=_get_excess_solar_device_schema(user_input if errors else None),
@@ -289,10 +329,10 @@ class ExcessSolarConfigFlowMixin:
         )
 
     async def async_step_excess_solar_another_device(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Ask whether to add another device."""
-        is_options_flow = hasattr(self, "_config_entry")
+        is_options_flow = self._options_entry() is not None
 
         if user_input is not None:
             if user_input.get(CONF_ADD_ANOTHER):
@@ -301,8 +341,8 @@ class ExcessSolarConfigFlowMixin:
                 return await self._async_finish_excess_solar_add_device()
             return await self._async_finish_excess_solar_new()
 
-        devices = self._config_data.get(CONF_POWER_DEVICES, [])
-        device_names = ", ".join(d[CONF_NAME] for d in devices)
+        devices = self._power_devices()
+        device_names = ", ".join(_device_name(d) for d in devices)
         return self.async_show_form(
             step_id="excess_solar_another_device",
             data_schema=vol.Schema(
@@ -316,17 +356,14 @@ class ExcessSolarConfigFlowMixin:
 
     async def _async_finish_excess_solar_new(self) -> ConfigFlowResult:
         """Finalise a new excess solar config entry."""
-        unique_id = self._config_data[CONF_NAME].lower().replace(" ", "_")
+        name = str(self._config_data[CONF_NAME])
+        unique_id = name.lower().replace(" ", "_")
         self._config_data[CONF_UNIQUE_ID] = unique_id
         self._config_data["entry_type"] = CONF_ENTITY_EXCESS_SOLAR
         self._config_data.pop(CONF_MINIMUM_OFF_TIME, None)
 
-        await self.async_set_unique_id(unique_id)
-        self._abort_if_unique_id_configured()
-
-        return self.async_create_entry(
-            title=self._config_data[CONF_NAME],
-            data=self._config_data,
+        return await self._async_create_unique_entry(
+            unique_id, name, self._config_data
         )
 
     # ------------------------------------------------------------------
@@ -334,24 +371,21 @@ class ExcessSolarConfigFlowMixin:
     # ------------------------------------------------------------------
 
     async def async_step_excess_solar_menu(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Show main options menu for excess solar."""
+        entry_data = self._entry_data()
         if user_input is not None:
             action = user_input.get(CONF_DEVICES_ACTION)
             if action == ACTION_EDIT_SETTINGS:
                 return await self.async_step_excess_solar_edit_settings()
             if action == ACTION_ADD_DEVICE:
-                if CONF_POWER_DEVICES not in self._config_data:
-                    self._config_data[CONF_POWER_DEVICES] = list(
-                        self._config_entry.data.get(CONF_POWER_DEVICES, [])
-                    )
+                # _config_data starts as a copy of the entry data, devices included.
                 return await self.async_step_excess_solar_device()
             if action == ACTION_REMOVE_DEVICES:
                 return await self.async_step_excess_solar_remove_devices()
 
-        existing = self._config_entry.data
-        devices = existing.get(CONF_POWER_DEVICES, [])
+        devices = _device_list(entry_data.get(CONF_POWER_DEVICES))
         return self.async_show_form(
             step_id="excess_solar_menu",
             data_schema=vol.Schema(
@@ -367,75 +401,65 @@ class ExcessSolarConfigFlowMixin:
             ),
             description_placeholders={
                 "device_count": str(len(devices)),
-                "device_names": (", ".join(d[CONF_NAME] for d in devices) or "none"),
+                "device_names": (", ".join(_device_name(d) for d in devices) or "none"),
             },
         )
 
     async def async_step_excess_solar_edit_settings(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Edit global excess solar settings (options flow)."""
+        entry = self._require_options_entry()
         if user_input is not None:
-            new_data = dict(self._config_entry.data)
+            new_data = self._entry_data()
             new_data[CONF_GRID_POWER_SENSOR] = user_input[CONF_GRID_POWER_SENSOR]
-            new_data[CONF_BUFFER] = int(user_input.get(CONF_BUFFER, 0))
+            new_data[CONF_BUFFER] = _to_int(user_input.get(CONF_BUFFER, 0))
             new_data.pop(CONF_MINIMUM_OFF_TIME, None)
 
-            self.hass.config_entries.async_update_entry(
-                self._config_entry, data=new_data
-            )
+            self.hass.config_entries.async_update_entry(entry, data=new_data)
             return self.async_create_entry(title="", data={})
 
         return self.async_show_form(
             step_id="excess_solar_edit_settings",
-            data_schema=_get_excess_solar_edit_settings_schema(
-                dict(self._config_entry.data)
-            ),
+            data_schema=_get_excess_solar_edit_settings_schema(self._entry_data()),
         )
-
-    async def async_step_excess_solar_add_device(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Add a device in the options flow - delegates to the shared device step."""
-        if CONF_POWER_DEVICES not in self._config_data:
-            self._config_data[CONF_POWER_DEVICES] = list(
-                self._config_entry.data.get(CONF_POWER_DEVICES, [])
-            )
-        return await self.async_step_excess_solar_device(user_input)
 
     async def async_step_excess_solar_remove_devices(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: FlowInput | None = None
     ) -> ConfigFlowResult:
         """Remove one or more devices from the options flow."""
-        existing_devices: list[dict[str, Any]] = list(
-            self._config_entry.data.get(CONF_POWER_DEVICES, [])
-        )
+        entry = self._require_options_entry()
+        entry_data = self._entry_data()
+        existing_devices = _device_list(entry_data.get(CONF_POWER_DEVICES))
 
         if not existing_devices:
             return self.async_abort(reason="no_devices_to_remove")
 
         if user_input is not None:
-            names_to_remove = set(user_input.get(CONF_DEVICES_TO_REMOVE, []))
-            updated_devices = [
-                d for d in existing_devices if d[CONF_NAME] not in names_to_remove
-            ]
-            new_data = {**self._config_entry.data, CONF_POWER_DEVICES: updated_devices}
-            new_data.pop(CONF_MINIMUM_OFF_TIME, None)
-            self.hass.config_entries.async_update_entry(
-                self._config_entry, data=new_data
+            selected = user_input.get(CONF_DEVICES_TO_REMOVE)
+            names_to_remove = (
+                {str(name) for name in cast(list[object], selected)}
+                if isinstance(selected, list)
+                else set[str]()
             )
+            updated_devices = [
+                d for d in existing_devices if _device_name(d) not in names_to_remove
+            ]
+            new_data = {**entry_data, CONF_POWER_DEVICES: updated_devices}
+            new_data.pop(CONF_MINIMUM_OFF_TIME, None)
+            self.hass.config_entries.async_update_entry(entry, data=new_data)
             return self.async_create_entry(title="", data={})
 
         device_options = [
-            selector.SelectOptionDict(value=d[CONF_NAME], label=d[CONF_NAME])
+            SelectOptionDict(value=_device_name(d), label=_device_name(d))
             for d in existing_devices
         ]
         return self.async_show_form(
             step_id="excess_solar_remove_devices",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_DEVICES_TO_REMOVE): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
+                    vol.Required(CONF_DEVICES_TO_REMOVE): SelectSelector(
+                        SelectSelectorConfig(
                             options=device_options,
                             multiple=True,
                         )
@@ -446,10 +470,8 @@ class ExcessSolarConfigFlowMixin:
 
     async def _async_finish_excess_solar_add_device(self) -> ConfigFlowResult:
         """Finalise adding a device in the options flow."""
-        new_data = {
-            **self._config_entry.data,
-            CONF_POWER_DEVICES: self._config_data[CONF_POWER_DEVICES],
-        }
+        entry = self._require_options_entry()
+        new_data = {**self._entry_data(), CONF_POWER_DEVICES: self._power_devices()}
         new_data.pop(CONF_MINIMUM_OFF_TIME, None)
-        self.hass.config_entries.async_update_entry(self._config_entry, data=new_data)
+        self.hass.config_entries.async_update_entry(entry, data=new_data)
         return self.async_create_entry(title="", data={})

@@ -319,26 +319,6 @@
       },
       "cheapest_hours_data_provider": {
         "title": "Price source",
-        "description": "Select one price source for cheapest hours calculation."
-      },
-      "cheapest_hours_basic": {
-        "title": "Basic settings",
-        "description": "Configure basic cheapest hours settings"
-      },
-      "cheapest_hours_advanced": {
-        "title": "Advanced settings",
-        "description": "Configure advanced options"
-      },
-      "cheapest_hours_offset": {
-        "title": "Time offset",
-        "description": "Configure optional start and end time offsets"
-      },
-      "cheapest_hours_flexible": {
-        "title": "Flexible slots",
-        "description": "Configure flexible slots"
-      },
-      "cheapest_hours_data_provider": {
-        "title": "Price source",
         "description": "Select one price source for cheapest hours calculation. Choose Nord Pool (custom integration), Nord Pool official, Entso-E, or Strømligning (Danish total price).",
         "data": {
           "data_provider_type": "Data provider type"
@@ -665,6 +645,22 @@
           "devices_to_remove": "Select one or more devices to remove from this excess solar entry"
         }
       }
+    }
+  },
+  "services": {
+    "clear_data": {
+      "name": "Clear cached data",
+      "description": "Clears the stored data of a cheapest hours sensor so it is recalculated on its next update.",
+      "fields": {
+        "unique_id": {
+          "name": "Unique ID",
+          "description": "Unique ID of the cheapest hours sensor whose data is cleared."
+        }
+      }
+    },
+    "reload": {
+      "name": "Reload YAML configuration",
+      "description": "Reloads the aio_energy_management configuration from configuration.yaml. Entries configured through the UI are not affected."
     }
   }
 }

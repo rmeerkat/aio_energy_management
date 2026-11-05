@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import logging
+from typing import Required, TypedDict, cast
 
-import voluptuous as vol
-from voluptuous import ALLOW_EXTRA, Invalid, Schema
+import probatio as vol
+from probatio import ALLOW_EXTRA, Invalid, Schema
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.core import HomeAssistant
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.template import Template
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .cheapest_hours import CheapestHoursBinarySensor
+from .cheapest_hours.binary_sensor import FlexibleConfig, OffsetConfig
+from .coordinator import EnergyManagementCoordinator
+from .entity import entry_device_info
 from .const import (
     CONF_ADD_FLEXIBLE,
     CONF_AREA,
@@ -55,11 +60,14 @@ from .const import (
     CONF_TRIGGER_HOUR_ENTITY,
     CONF_TRIGGER_TIME,
     CONF_UNIQUE_ID,
-    COORDINATOR,
-    DOMAIN,
     YAML_EXCESS_SOLAR_INSTANCE_KEY,
 )
-from .excess_solar import ExcessSolarBinarySensor
+from .runtime_data import (
+    AIOEnergyManagementConfigEntry,
+    get_coordinator,
+    get_entry_runtime_data,
+    get_yaml_excess_solar_runtime_data,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -112,26 +120,82 @@ CHEAPEST_HOURS_PLATFORM_SCHEMA = Schema(
 )
 
 
+class CheapestHoursConfig(TypedDict, total=False):
+    """Validated configuration fields used to create a cheapest-hours sensor."""
+
+    unique_id: Required[str]
+    name: Required[str]
+    first_hour: Required[int]
+    last_hour: Required[int]
+    sequential: Required[bool]
+    nordpool_entity: str
+    nordpool_official_config_entry: str
+    entsoe_entity: str
+    stromligning_entity: str
+    stromligning_tomorrow_entity: str
+    starting_today: bool
+    number_of_hours: int | str
+    number_of_slots: int | str
+    number_of_slots_entity: str
+    min_seq_slots: int | str
+    number_of_blocks: int | str
+    failsafe_starting_hour: int
+    inversed: bool
+    trigger_time: str
+    trigger_hour: int | str
+    trigger_hour_entity: str
+    max_price: float | str
+    price_limit: float | str
+    price_limit_entity: str
+    add_flexible: FlexibleConfig
+    calendar: bool
+    retention_days: int
+    offset: OffsetConfig
+    mtu: int
+    area: str
+    price_modifications: Template | str
+
+
+def _validate_cheapest_hours_config(data: object) -> CheapestHoursConfig:
+    """Validate legacy YAML data and expose its known fields to the type checker.
+
+    The schema output is only used as a check: the original data is returned,
+    because the schema converts values (e.g. ``price_modifications`` into a
+    ``Template``) that ``_create_cheapest_hours_entity`` converts itself.
+    """
+    if not isinstance(data, dict):
+        raise vol.Invalid("Expected a mapping")
+    CHEAPEST_HOURS_PLATFORM_SCHEMA(data)
+    return cast(CheapestHoursConfig, cast(object, data))
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: AIOEnergyManagementConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up binary sensor from a config entry."""
     entry_type = entry.data.get("entry_type")
 
     if entry_type == CONF_ENTITY_EXCESS_SOLAR:
-        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-        sensors: list[ExcessSolarBinarySensor] = entry_data.get(
-            "excess_solar_sensors", []
-        )
-        async_add_entities(sensors)
+        excess_solar = get_entry_runtime_data(entry).excess_solar
+        if excess_solar is not None:
+            async_add_entities(excess_solar.sensors)
         return
 
     try:
         # Merge data and options to make sure changes via UI are taking into account
-        config_data = {**entry.data, **entry.options}
-        entity = _create_cheapest_hours_entity(hass, config_data)
+        # Config-flow data is validated by the flow itself; the YAML schema does
+        # not apply here (e.g. NumberSelector stores hours as floats).
+        config_data = cast(
+            CheapestHoursConfig, cast(object, {**entry.data, **entry.options})
+        )
+        entity = _create_cheapest_hours_entity(
+            hass,
+            config_data,
+            coordinator=get_entry_runtime_data(entry).shared.coordinator,
+            entry_id=entry.entry_id,
+        )
         async_add_entities([entity])
     except Exception as e:
         _LOGGER.error(
@@ -142,19 +206,23 @@ async def async_setup_entry(
 
 async def async_setup_platform(
     hass: HomeAssistant,
-    config: ConfigType,
+    _config: ConfigType,
     async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Sensor containing amount of cheapest hours marked in the configuration (YAML legacy)."""
-    entry_type = discovery_info["entry_type"]
+    if discovery_info is None:
+        return
 
-    entities = []
+    discovery_data = cast(dict[str, object], discovery_info)
+    entry_type = discovery_data.get("entry_type")
+
+    entities: list[BinarySensorEntity] = []
     # Configure cheapest hours binary sensor
     if entry_type == CONF_ENTITY_CHEAPEST_HOURS:
         try:
-            CHEAPEST_HOURS_PLATFORM_SCHEMA(discovery_info)
-            entities.append(_create_cheapest_hours_entity(hass, discovery_info))
+            validated_config = _validate_cheapest_hours_config(discovery_data)
+            entities.append(_create_cheapest_hours_entity(hass, validated_config))
         except Invalid as e:
             _LOGGER.error(
                 "Configuration validation error for nord pool cheapest hours sensor: %s",
@@ -162,23 +230,26 @@ async def async_setup_platform(
             )
 
     elif entry_type == CONF_ENTITY_EXCESS_SOLAR:
-        storage_key = discovery_info.get(CONF_UNIQUE_ID, YAML_EXCESS_SOLAR_INSTANCE_KEY)
-        entry_data = hass.data.get(DOMAIN, {}).get(storage_key, {})
-        excess_sensors: list[ExcessSolarBinarySensor] = entry_data.get(
-            "excess_solar_sensors", []
-        )
-        if not excess_sensors:
+        storage_key = discovery_data.get(CONF_UNIQUE_ID)
+        if not isinstance(storage_key, str):
+            storage_key = YAML_EXCESS_SOLAR_INSTANCE_KEY
+        excess_solar = get_yaml_excess_solar_runtime_data(hass, storage_key)
+        if excess_solar is None or not excess_solar.sensors:
             _LOGGER.warning(
                 "Excess solar platform loaded but no sensors found in hass.data"
             )
-        entities.extend(excess_sensors)
+        else:
+            entities.extend(excess_solar.sensors)
 
     async_add_entities(entities)
 
 
 # Cheapest hours
 def _create_cheapest_hours_entity(
-    hass: HomeAssistant, discovery_info: DiscoveryInfoType | None = None
+    hass: HomeAssistant,
+    discovery_info: CheapestHoursConfig,
+    coordinator: EnergyManagementCoordinator | None = None,
+    entry_id: str | None = None,
 ) -> CheapestHoursBinarySensor:
     nordpool_entity = discovery_info.get(CONF_NORDPOOL_ENTITY)
     nordpool_official_config_entry = discovery_info.get(
@@ -225,6 +296,11 @@ def _create_cheapest_hours_entity(
     if pm := discovery_info.get(CONF_PRICE_MODIFICATIONS):
         price_modifications = cv.template(pm)
 
+    if coordinator is None:
+        coordinator = get_coordinator(hass)
+    if coordinator is None:
+        raise RuntimeError("Coordinator not initialized")
+
     return CheapestHoursBinarySensor(
         hass=hass,
         entsoe_entity=entsoe_entity,
@@ -241,7 +317,7 @@ def _create_cheapest_hours_entity(
         number_of_slots=number_of_slots,
         min_seq_slots=min_seq_slots,
         number_of_blocks=number_of_blocks,
-        coordinator=hass.data[DOMAIN][COORDINATOR],
+        coordinator=coordinator,
         sequential=sequential,
         failsafe_starting_hour=failsafe_starting_hour,
         inversed=inversed,
@@ -255,4 +331,7 @@ def _create_cheapest_hours_entity(
         price_modifications=price_modifications,
         retention_days=retention_days,
         area=area,
+        device_info=(
+            entry_device_info(entry_id, name) if entry_id is not None else None
+        ),
     )

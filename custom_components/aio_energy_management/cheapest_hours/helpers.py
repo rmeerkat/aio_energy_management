@@ -1,15 +1,11 @@
-# custom_components/aio_energy_management/helpers.py
-
-# 1. validation checks (_validate_offset_integer_fields, etc.)
-# 2. Cleanup logic (_validate_and_clean_offset_fields)
-# 3. Input processors (_process_offset_input)
-
 """Cheapest hours configuration flow helpers and validation logic."""
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import cast
 
+from ..flow_types import FlowInput, as_number
 from custom_components.aio_energy_management.const import (
     CONF_ADD_FLEXIBLE,
     CONF_END,
@@ -44,7 +40,7 @@ from custom_components.aio_energy_management.const import (
 
 
 def _validate_and_clean_static_or_entity(
-    user_input: dict[str, Any],
+    user_input: FlowInput,
     static_key: str,
     entity_key: str,
     field_name: str,
@@ -78,36 +74,44 @@ def _validate_and_clean_static_or_entity(
 
 
 def get_val(
-    data: dict, key: str, flex_key: str | None = None, default: Any = None
-) -> Any:
+    data: Mapping[str, object],
+    key: str,
+    flex_key: str | None = None,
+    default: object = None,
+) -> object:
     """Retrieve the suggested value from user_input, add_flexible, or the default."""
-    flex_data = data.get(CONF_ADD_FLEXIBLE) or {}
-    val = flex_data.get(flex_key) if flex_key else None
+    flex_data = data.get(CONF_ADD_FLEXIBLE)
+    val = (
+        cast(Mapping[str, object], flex_data).get(flex_key)
+        if flex_key and isinstance(flex_data, Mapping)
+        else None
+    )
     if val is None:
         val = data.get(key)
     return val if val is not None else default
 
 
-def mtu_default(user_input: dict[str, Any] | None) -> str:
+def mtu_default(user_input: Mapping[str, object] | None) -> str:
     """Return the MTU dropdown default as a string."""
-    if user_input and user_input.get(CONF_MTU) is not None:
-        return str(user_input[CONF_MTU])
+    if user_input and (mtu := user_input.get(CONF_MTU)) is not None:
+        return str(mtu)
     return "60"
 
 
-def coerce_mtu(user_input: dict[str, Any]) -> None:
+def coerce_mtu(user_input: FlowInput) -> None:
     """Coerce the MTU dropdown value (a string) back to an int in place."""
-    if user_input.get(CONF_MTU) is not None:
-        user_input[CONF_MTU] = int(user_input[CONF_MTU])
+    mtu = user_input.get(CONF_MTU)
+    if isinstance(mtu, (int, float, str)):
+        user_input[CONF_MTU] = int(mtu)
 
 
-def normalize_optional_keys(user_input: dict[str, Any], keys: list[str]) -> None:
+def normalize_optional_keys(user_input: FlowInput, keys: list[str]) -> None:
     """Ensure every optional key is present (as None) so clearing it in the UI overwrites the stored value."""
     for key in keys:
         user_input.setdefault(key, None)
 
 
-def sanitize_cheapest_hours_input(user_input: dict[str, Any]) -> dict[str, Any]:
+def sanitize_cheapest_hours_input(user_input: FlowInput) -> FlowInput:
     """Convert form input numbers from float to int before saving."""
     cleaned = dict(user_input)
     int_keys = [
@@ -125,15 +129,16 @@ def sanitize_cheapest_hours_input(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_END_MINUTES_ENTITY,
     ]
     for key in int_keys:
-        if key in cleaned and cleaned[key] is not None:
+        value = cleaned.get(key)
+        if isinstance(value, (int, float, str)):
             try:
-                cleaned[key] = int(cleaned[key])
-            except ValueError, TypeError:
+                cleaned[key] = int(value)
+            except ValueError:
                 pass
     return cleaned
 
 
-def clean_sequential_basic_fields(user_input: dict[str, Any]) -> None:
+def clean_sequential_basic_fields(user_input: FlowInput) -> None:
     """Clear non-sequential fields in user_input when sequential mode is active."""
     if user_input.get(CONF_SEQUENTIAL) is True:
         non_sequential_keys = [
@@ -144,7 +149,7 @@ def clean_sequential_basic_fields(user_input: dict[str, Any]) -> None:
             user_input[key] = None
 
 
-def validate_and_clean_number_of_slots(user_input: dict[str, Any]) -> dict[str, str]:
+def validate_and_clean_number_of_slots(user_input: FlowInput) -> dict[str, str]:
     """Validate and clean number of slots configuration."""
     return _validate_and_clean_static_or_entity(
         user_input,
@@ -156,10 +161,9 @@ def validate_and_clean_number_of_slots(user_input: dict[str, Any]) -> dict[str, 
 
 
 def validate_and_clean_advanced_fields(
-    user_input: dict[str, Any],
+    user_input: FlowInput,
     sequential: bool = False,
-    mtu: int = 60,
-    config_data: dict[str, Any] | None = None,
+    config_data: FlowInput | None = None,
 ) -> dict[str, str]:
     """Validate and clean all advanced configuration fields."""
     errors: dict[str, str] = {}
@@ -207,7 +211,7 @@ def validate_and_clean_advanced_fields(
 
 
 def validate_and_build_add_flexible(
-    user_input: dict[str, Any],
+    user_input: FlowInput,
     mtu: int,
     stored_price_limit: float | None = None,
 ) -> dict[str, str]:
@@ -239,7 +243,7 @@ def validate_and_build_add_flexible(
     max_price_delta = user_input.get(CONF_MAX_PRICE_DELTA)
     if max_price_delta is None:
         user_input.pop(CONF_MAX_PRICE_DELTA, None)
-    elif max_price_delta < 0:
+    elif (delta := as_number(max_price_delta)) is not None and delta < 0:
         errors[CONF_MAX_PRICE_DELTA] = "max_price_delta_negative"
         return errors
 
@@ -265,15 +269,15 @@ def validate_and_build_add_flexible(
         errors["base"] = "add_flexible_incomplete"
         return errors
 
-    max_slots = user_input.get(CONF_MAX_NUMBER_OF_SLOTS)
+    max_slots = as_number(user_input.get(CONF_MAX_NUMBER_OF_SLOTS))
     if max_slots is not None:
         cap = 96 if mtu == 15 else 24
         if max_slots < 1 or max_slots > cap:
             errors[CONF_MAX_NUMBER_OF_SLOTS] = "max_number_of_slots_out_of_range"
             return errors
 
-    flexible_price_limit = user_input.get(CONF_FLEXIBLE_PRICE_LIMIT)
-    price_limit = user_input.get(CONF_PRICE_LIMIT)
+    flexible_price_limit = as_number(user_input.get(CONF_FLEXIBLE_PRICE_LIMIT))
+    price_limit = as_number(user_input.get(CONF_PRICE_LIMIT))
     if price_limit is None:
         price_limit = stored_price_limit
     if (
@@ -284,7 +288,7 @@ def validate_and_build_add_flexible(
         errors[CONF_FLEXIBLE_PRICE_LIMIT] = "flexible_price_limit_not_below_price_limit"
         return errors
 
-    add_flexible: dict[str, Any] = {}
+    add_flexible: FlowInput = {}
     if CONF_MAX_NUMBER_OF_SLOTS in user_input:
         add_flexible[CONF_MAX_NUMBER_OF_SLOTS] = user_input.pop(
             CONF_MAX_NUMBER_OF_SLOTS
@@ -311,7 +315,7 @@ def validate_and_build_add_flexible(
     return errors
 
 
-def validate_and_clean_offset_fields(user_input: dict[str, Any]) -> dict[str, str]:
+def validate_and_clean_offset_fields(user_input: FlowInput) -> dict[str, str]:
     """Validate and clean offset configuration fields."""
     errors: dict[str, str] = {}
 
@@ -358,13 +362,13 @@ def validate_and_clean_offset_fields(user_input: dict[str, Any]) -> dict[str, st
     return errors
 
 
-def validate_basic_integer_fields(user_input: dict[str, Any]) -> dict[str, str]:
+def validate_basic_integer_fields(user_input: FlowInput) -> dict[str, str]:
     """Validate integer fields on the basic cheapest hours step."""
     errors: dict[str, str] = {}
 
-    first_hour = user_input.get(CONF_FIRST_HOUR)
-    last_hour = user_input.get(CONF_LAST_HOUR)
-    number_of_slots = user_input.get(CONF_NUMBER_OF_SLOTS)
+    first_hour = as_number(user_input.get(CONF_FIRST_HOUR))
+    last_hour = as_number(user_input.get(CONF_LAST_HOUR))
+    number_of_slots = as_number(user_input.get(CONF_NUMBER_OF_SLOTS))
 
     if first_hour is not None and not (0 <= first_hour <= 23):
         errors[CONF_FIRST_HOUR] = "first_hour_out_of_range"
@@ -378,38 +382,38 @@ def validate_basic_integer_fields(user_input: dict[str, Any]) -> dict[str, str]:
     return errors
 
 
-def validate_advanced_integer_fields(user_input: dict[str, Any]) -> dict[str, str]:
+def validate_advanced_integer_fields(user_input: FlowInput) -> dict[str, str]:
     """Validate optional integer fields on the advanced cheapest hours step."""
     errors: dict[str, str] = {}
 
-    failsafe = user_input.get(CONF_FAILSAFE_STARTING_HOUR)
+    failsafe = as_number(user_input.get(CONF_FAILSAFE_STARTING_HOUR))
     if failsafe is not None and not (0 <= failsafe <= 23):
         errors[CONF_FAILSAFE_STARTING_HOUR] = "failsafe_starting_hour_out_of_range"
 
-    trigger_hour = user_input.get(CONF_TRIGGER_HOUR)
+    trigger_hour = as_number(user_input.get(CONF_TRIGGER_HOUR))
     if trigger_hour is not None and not (0 <= trigger_hour <= 23):
         errors[CONF_TRIGGER_HOUR] = "trigger_hour_out_of_range"
 
-    min_seq_slots = user_input.get(CONF_MIN_SEQ_SLOTS)
+    min_seq_slots = as_number(user_input.get(CONF_MIN_SEQ_SLOTS))
     if min_seq_slots is not None and min_seq_slots < 1:
         errors[CONF_MIN_SEQ_SLOTS] = "min_seq_slots_out_of_range"
 
-    number_of_blocks = user_input.get(CONF_NUMBER_OF_BLOCKS)
+    number_of_blocks = as_number(user_input.get(CONF_NUMBER_OF_BLOCKS))
     if number_of_blocks is not None and number_of_blocks < 1:
         errors[CONF_NUMBER_OF_BLOCKS] = "number_of_blocks_out_of_range"
 
     return errors
 
 
-def validate_offset_integer_fields(user_input: dict[str, Any]) -> dict[str, str]:
+def validate_offset_integer_fields(user_input: FlowInput) -> dict[str, str]:
     """Validate optional integer fields on the offset step."""
     errors: dict[str, str] = {}
 
-    start_minutes = user_input.get(f"{CONF_START}_{CONF_MINUTES}")
+    start_minutes = as_number(user_input.get(f"{CONF_START}_{CONF_MINUTES}"))
     if start_minutes is not None and not (-59 <= start_minutes <= 59):
         errors[f"{CONF_START}_{CONF_MINUTES}"] = "start_minutes_out_of_range"
 
-    end_minutes = user_input.get(f"{CONF_END}_{CONF_MINUTES}")
+    end_minutes = as_number(user_input.get(f"{CONF_END}_{CONF_MINUTES}"))
     if end_minutes is not None and not (-59 <= end_minutes <= 59):
         errors[f"{CONF_END}_{CONF_MINUTES}"] = "end_minutes_out_of_range"
 
@@ -417,17 +421,17 @@ def validate_offset_integer_fields(user_input: dict[str, Any]) -> dict[str, str]
 
 
 def process_offset_input(
-    user_input: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
+    user_input: FlowInput,
+) -> tuple[dict[str, FlowInput], FlowInput]:
     """Process offset input and build offset structure."""
-    offset = {}
-    entities = {}
+    offset: dict[str, FlowInput] = {}
+    entities: FlowInput = {}
 
     if any(
         user_input.get(f"{CONF_START}_{key}") is not None
         for key in [CONF_HOURS, CONF_MINUTES]
     ):
-        start_offset = {}
+        start_offset: FlowInput = {}
         if user_input.get(f"{CONF_START}_{CONF_HOURS}") is not None:
             start_offset[CONF_HOURS] = user_input[f"{CONF_START}_{CONF_HOURS}"]
         if user_input.get(f"{CONF_START}_{CONF_MINUTES}") is not None:
@@ -444,7 +448,7 @@ def process_offset_input(
         user_input.get(f"{CONF_END}_{key}") is not None
         for key in [CONF_HOURS, CONF_MINUTES]
     ):
-        end_offset = {}
+        end_offset: FlowInput = {}
         if user_input.get(f"{CONF_END}_{CONF_HOURS}") is not None:
             end_offset[CONF_HOURS] = user_input[f"{CONF_END}_{CONF_HOURS}"]
         if user_input.get(f"{CONF_END}_{CONF_MINUTES}") is not None:

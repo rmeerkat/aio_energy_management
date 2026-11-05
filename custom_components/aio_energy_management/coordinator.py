@@ -1,28 +1,35 @@
 """Data coordinator. Owns all the data."""
 
-from datetime import datetime, timedelta
+from collections.abc import MutableMapping
+from datetime import timedelta
 import logging
-from typing import Any
+from typing import cast
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 import homeassistant.util.dt as dt_util
 
 from .helpers import convert_datetime, from_str_to_datetime
+from .models.cheapest_hours_data import CheapestHoursData, TimeSlot
 
 STORAGE_VERSION = 1
 STORAGE_KEY = "aio_energy_management.storage"
 _LOGGER = logging.getLogger(__name__)
+
+type CoordinatorData = dict[str, CheapestHoursData]
 
 
 # TODO: .. version migration
 class EnergyManagementCoordinator:
     """Common coordinator for Energy Management component. Owner of the data."""
 
+    _store: Store[CoordinatorData]
+    data: CoordinatorData
+    requires_calendar_update: bool
+
     def __init__(self, hass: HomeAssistant) -> None:
         """Init persistent store."""
-        self._store = Store[dict[str, Any]](hass, STORAGE_VERSION, STORAGE_KEY)
-        self.listeners = []
+        self._store = Store[CoordinatorData](hass, STORAGE_VERSION, STORAGE_KEY)
         self.data = {}
         self.requires_calendar_update = False
 
@@ -43,7 +50,7 @@ class EnergyManagementCoordinator:
             self.data.pop(unique_id, None)
             await self._async_save_data()
 
-    async def async_load_data(self):
+    async def async_load_data(self) -> None:
         """Load data from store."""
         stored = await self._store.async_load()
         if stored:
@@ -54,131 +61,108 @@ class EnergyManagementCoordinator:
     async def async_set_data(
         self,
         entity_id: str,
-        name: str,
+        name: str | None,
         calendar: bool,
         module: str,
-        dict: dict,  # Data that is currently active or upcoming
-        archived: list | None,  # Data that is to be moved on the archive
+        data: CheapestHoursData,  # Data that is currently active or upcoming
+        archived: list[TimeSlot] | None,  # Data that is to be moved on the archive
     ) -> None:
         """Set entity data."""
-        prev_archived = {}
+        prev_archived: list[TimeSlot] | None = None
 
         # Check if previous
         if entity := self.data.get(entity_id):
             prev_archived = entity.get("archived")
 
-        self.data[entity_id] = dict
-        self.data[entity_id]["name"] = name
-        self.data[entity_id]["type"] = module
-        self.data[entity_id]["calendar"] = calendar
-
-        self.data[entity_id]["archived"] = self._update_archived(
-            entity_id, prev_archived, archived
-        )
+        data["name"] = name
+        data["type"] = module
+        data["calendar"] = calendar
+        data["archived"] = self._update_archived(prev_archived, archived)
+        self.data[entity_id] = data
 
         _LOGGER.debug(
             "Set new data for %s. Archive is = %s",
             entity_id,
-            [self.data[entity_id]["archived"]],
+            [data["archived"]],
         )
 
         self.requires_calendar_update = True
         await self._async_save_data()
 
     def _update_archived(
-        self, entity_id: str, existing_archive: list | None, new_data: list | None
-    ) -> list:
-        """Merge archived lists by 'start' key, preferring self.data[entity_id] values on conflict."""
-
-        current_archived = existing_archive
-        if current_archived is None:
-            current_archived = []
-
+        self,
+        existing_archive: list[TimeSlot] | None,
+        new_data: list[TimeSlot] | None,
+    ) -> list[TimeSlot]:
+        """Merge archived lists by 'start' key, preferring existing values on conflict."""
         # Build dicts keyed by 'start' for fast lookup
         current_by_start = {
-            item["start"]: item for item in current_archived if "start" in item
+            item["start"]: item for item in existing_archive or [] if "start" in item
         }
-
-        new_by_start = []
-        if new_data is not None:
-            new_by_start = {item["start"]: item for item in new_data if "start" in item}
+        new_by_start = {item["start"]: item for item in new_data or [] if "start" in item}
 
         # Merge keys: use current if exists, else new
-        merged = []
-        all_starts = set(current_by_start) | set(new_by_start)
-        for start in sorted(all_starts):
-            if start in current_by_start:
-                merged.append(current_by_start[start])
-            else:
-                merged.append(new_by_start[start])
-
-        return merged
+        return [
+            current_by_start.get(start) or new_by_start[start]
+            for start in sorted(set(current_by_start) | set(new_by_start))
+        ]
 
     def clear_archived(self, entity_id: str, retention_days: int) -> None:
         """Clear archived data older than retention days."""
-        now = dt_util.now()
+        oldest_end = dt_util.now() - timedelta(days=retention_days)
         if entity_data := self.data.get(entity_id):
-            archived = entity_data.get("archived", [])
-            filtered_archived = [
-                item
-                for item in archived
-                if "end" in item
-                and (
-                    from_str_to_datetime(item["end"])
-                    >= now - timedelta(days=retention_days)
-                )
-            ]
-            self.data[entity_id]["archived"] = filtered_archived
+            filtered_archived: list[TimeSlot] = []
+            for item in entity_data.get("archived", []):
+                end = from_str_to_datetime(item.get("end"))
+                if end is not None and end >= oldest_end:
+                    filtered_archived.append(item)
+            entity_data["archived"] = filtered_archived
             _LOGGER.debug(
                 "After clearing, archived for %s is %s",
                 entity_id,
                 filtered_archived,
             )
 
-    def get_data(self, entity_id: str) -> dict | None:
-        """Get entity data."""
+    def get_data(self, entity_id: str) -> CheapestHoursData:
+        """Get entity data, always containing a 'list'."""
         _LOGGER.debug("Query data from store for %s", entity_id)
-        data = self.data.get(entity_id)
-        if data is None:
-            data = {}
-
+        data: CheapestHoursData = self.data.get(entity_id) or {}
         if data.get("list") is None:
             data["list"] = []  # Always contain list
         return data
 
-    def convert_datetimes(self, dictionary: dict) -> dict | None:
+    def convert_datetimes(self, stored: CoordinatorData) -> CoordinatorData:
         """Convert stored datetime items back to data."""
-        for k, v in dictionary.items():
-            dictionary[k] = self._convert_datetimes_of_item(v)
-        return dictionary
+        for key, value in stored.items():
+            stored[key] = self._convert_datetimes_of_item(
+                cast(MutableMapping[str, object], cast(object, value))
+            )
+        return stored
 
-    def _convert_datetimes_of_item(self, dictionary: dict) -> dict:
-        """Convert stored datetime strings back to datetime objects."""
-        datetime_fields = {"expiration", "updated_at"}
-        date_fields = {"fetch_date"}
-        list_fields = {"list", "archived"}
+    def _convert_datetimes_of_item(
+        self, item: MutableMapping[str, object]
+    ) -> CheapestHoursData:
+        """Convert stored datetime strings back to datetime/date objects."""
+        for field in ("expiration", "updated_at"):
+            if isinstance(value := item.get(field), str):
+                item[field] = from_str_to_datetime(value)
 
-        for field in datetime_fields:
-            if value := dictionary.get(field):
-                if isinstance(value, str):
-                    dictionary[field] = from_str_to_datetime(value)
+        if isinstance(value := item.get("fetch_date"), str):
+            item["fetch_date"] = dt_util.parse_date(value)
 
-        for field in date_fields:
-            if value := dictionary.get(field):
-                if isinstance(value, str):
-                    dictionary[field] = dt_util.parse_date(value)
+        for field in ("list", "archived"):
+            if isinstance(value := item.get(field), list) and value:
+                item[field] = convert_datetime(
+                    cast(list[MutableMapping[str, object]], value)
+                )
 
-        for field in list_fields:
-            if value := dictionary.get(field):
-                dictionary[field] = convert_datetime(value)
+        if isinstance(data_next := item.get("next"), dict):
+            next_item = cast(MutableMapping[str, object], data_next)
+            if isinstance(list_next := next_item.get("list"), list) and list_next:
+                next_item["list"] = convert_datetime(
+                    cast(list[MutableMapping[str, object]], list_next)
+                )
+            if isinstance(expiration_next := next_item.get("expiration"), str):
+                next_item["expiration"] = from_str_to_datetime(expiration_next)
 
-        if data_next := dictionary.get("next"):
-            if list_next := data_next.get("list"):
-                dictionary["next"]["list"] = convert_datetime(list_next)
-            if expiration_next := data_next.get("expiration"):
-                if isinstance(expiration_next, str):
-                    dictionary["next"]["expiration"] = from_str_to_datetime(
-                        expiration_next
-                    )
-
-        return dictionary
+        return cast(CheapestHoursData, cast(object, item))

@@ -1,0 +1,55 @@
+rules:
+  # Bronze
+  action-setup: done
+  appropriate-polling:
+    status: done
+    comment: >-
+      Cheapest hours sensors poll at Home Assistant's default 30 second
+      interval, which matches switching on hour or 15 minute boundaries.
+      Excess solar listens to the grid power sensor instead of polling.
+  brands:
+    status: done
+    comment: >-
+      Ships brand/icon.png (256x256) and icon@2x.png (512x512); the icon is
+      also used as logo.
+  common-modules:
+    status: done
+    comment: >-
+      coordinator.py holds the stored data; entity.py the shared device info.
+      There is no shared base entity class.
+  config-flow: done
+  config-flow-test-coverage: done
+  dependency-transparency:
+    status: done
+    comment: The integration has no external requirements.
+  docs-actions: done
+  docs-conditions:
+    status: exempt
+    comment: The integration does not provide conditions.
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions: done
+  docs-triggers:
+    status: exempt
+    comment: The integration does not provide triggers.
+  entity-event-setup:
+    status: done
+    comment: >-
+      Entities do not subscribe to events. The excess solar manager starts
+      listening when its entry is set up and stops when it is unloaded.
+  entity-unique-id: done
+  has-entity-name: done
+  runtime-data: done
+  test-before-configure:
+    status: exempt
+    comment: >-
+      The integration does not connect to a device or service. Price sources
+      are chosen with entity and config entry selectors, which only offer
+      existing entities and entries.
+  test-before-setup:
+    status: exempt
+    comment: >-
+      A cheapest hours sensor must be set up even when its price source is
+      not available yet, so its failsafe can still switch it on. It waits
+      for prices instead of failing setup.
+  unique-config-entry: done

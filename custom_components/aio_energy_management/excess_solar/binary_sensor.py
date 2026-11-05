@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from collections.abc import Mapping
+from datetime import datetime, timedelta
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import override, TYPE_CHECKING
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 import homeassistant.util.dt as dt_util
 
 if TYPE_CHECKING:
-    from .switch import ExcessSolarDeviceEnabledSwitch
+    from ..entity import EntityDeviceInfo
+    from .number import ExcessSolarPriorityNumber
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +35,23 @@ class ExcessSolarBinarySensor(BinarySensorEntity):
     - ``_last_turned_off`` – timestamp when turned off by manager
     """
 
+    hass: HomeAssistant
+    _attr_has_entity_name: bool = True
+    _attr_device_info: EntityDeviceInfo
+    device_entity_id: str
+    _consumption: int
+    _consumption_entity: str | None
+    _attr_unique_id: str | None
+    _attr_name: str | None
+    _attr_icon: str | None
+    _initial_priority: int
+    _priority_number_entity: ExcessSolarPriorityNumber | None
+    is_on_schedule_entity: str | None
+    _enabled_switch: SwitchEntity | None
+    minimum_on_time: timedelta
+    minimum_off_time: timedelta
+    _attr_is_on: bool | None
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -41,10 +62,11 @@ class ExcessSolarBinarySensor(BinarySensorEntity):
         name: str,
         priority: int = 100,
         is_on_schedule_entity: str | None = None,
-        enabled_switch: ExcessSolarDeviceEnabledSwitch | None = None,
+        enabled_switch: SwitchEntity | None = None,
         minimum_on_time: int = 0,  # minutes
         minimum_off_time: int = DEFAULT_MINIMUM_OFF_TIME,  # minutes
-        priority_number_entity: Any = None,
+        priority_number_entity: ExcessSolarPriorityNumber | None = None,
+        device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialise the excess solar binary sensor."""
         self.hass = hass
@@ -53,6 +75,7 @@ class ExcessSolarBinarySensor(BinarySensorEntity):
         self._consumption_entity = consumption_entity
         self._attr_unique_id = unique_id
         self._attr_name = name
+        self._attr_device_info = device_info
         self._attr_icon = "mdi:solar-power-variant"
         self._initial_priority = priority
         self._priority_number_entity = priority_number_entity
@@ -61,9 +84,9 @@ class ExcessSolarBinarySensor(BinarySensorEntity):
         self.minimum_on_time = timedelta(minutes=minimum_on_time)
         self.minimum_off_time = timedelta(minutes=minimum_off_time)
 
-        self._attr_is_on: bool = False
-        self._last_turned_on: Any = None
-        self._last_turned_off: Any = None
+        self._attr_is_on = False
+        self._last_turned_on: datetime | None = None
+        self._last_turned_off: datetime | None = None
 
     # ------------------------------------------------------------------
     # State helpers used by the manager
@@ -144,7 +167,7 @@ class ExcessSolarBinarySensor(BinarySensorEntity):
         """Return True if this device participates in solar management."""
         if self._enabled_switch is None:
             return True
-        return self._enabled_switch.is_on
+        return self._enabled_switch.is_on is True
 
     def can_turn_on(self) -> bool:
         """Return True if minimum_off_time since last turn-off has elapsed."""
@@ -195,10 +218,13 @@ class ExcessSolarBinarySensor(BinarySensorEntity):
     # BinarySensorEntity
     # ------------------------------------------------------------------
 
+    # A plain property on purpose: HA declares this as a cached_property, but
+    # these attributes change with every state update and must not be cached.
     @property
-    def extra_state_attributes(self) -> dict:
+    @override
+    def extra_state_attributes(self) -> Mapping[str, object]:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Return extra attributes."""
-        attrs = {
+        attrs: dict[str, object] = {
             "device_entity": self.device_entity_id,
             "priority": self.priority,
             "consumption_w": self.get_consumption(),
@@ -214,8 +240,8 @@ class ExcessSolarBinarySensor(BinarySensorEntity):
 
         if self._priority_number_entity is not None:
             entity_ref = (
-                getattr(self._priority_number_entity, "entity_id", None)
-                or self._priority_number_entity._attr_unique_id
+                self._priority_number_entity.entity_id
+                or self._priority_number_entity.unique_id
             )
             attrs["priority_entity"] = entity_ref
         return attrs

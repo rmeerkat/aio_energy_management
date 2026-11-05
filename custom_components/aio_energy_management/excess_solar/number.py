@@ -4,26 +4,40 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import logging
+from typing import override, TYPE_CHECKING
 
-from homeassistant.components.number import NumberEntity, NumberMode
+from homeassistant.components.number import NumberMode, RestoreNumber
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.device_registry import DeviceInfo
+
+if TYPE_CHECKING:
+    from ..entity import EntityDeviceInfo
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class ExcessSolarPriorityNumber(NumberEntity, RestoreEntity):
+class ExcessSolarPriorityNumber(RestoreNumber):
     """Number entity to control power device priority dynamically.
 
     Lower numbers = higher priority.
     Range: 1-100, default 100.
     """
 
-    _attr_mode = NumberMode.BOX
-    _attr_native_min_value = 1
-    _attr_native_max_value = 100
-    _attr_native_step = 1
-    _attr_icon = "mdi:priority-high"
+    _attr_mode: NumberMode = NumberMode.BOX
+    _attr_native_min_value: float = 1
+    _attr_native_max_value: float = 100
+    _attr_native_step: float = 1
+    _attr_icon: str | None = "mdi:priority-high"
+
+    _attr_has_entity_name: bool = True
+    _attr_device_info: EntityDeviceInfo
+
+    hass: HomeAssistant
+    _attr_unique_id: str | None
+    _attr_name: str | None
+    _attr_native_value: float | None
+    _initial_priority: int
+    _on_priority_change: Callable[[], None] | None
 
     def __init__(
         self,
@@ -32,15 +46,18 @@ class ExcessSolarPriorityNumber(NumberEntity, RestoreEntity):
         unique_id: str,
         initial_priority: int = 100,
         on_priority_change_callback: Callable[[], None] | None = None,
+        device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize the priority number entity."""
         self.hass = hass
         self._attr_unique_id = f"{unique_id}_priority"
         self._attr_name = f"{device_name} Priority"
+        self._attr_device_info = device_info
         self._attr_native_value = float(initial_priority)
         self._initial_priority = initial_priority
         self._on_priority_change = on_priority_change_callback
 
+    @override
     async def async_added_to_hass(self) -> None:
         """Restore previous state when entity is added to hass."""
         await super().async_added_to_hass()
@@ -76,16 +93,17 @@ class ExcessSolarPriorityNumber(NumberEntity, RestoreEntity):
                         self._initial_priority,
                     )
 
+    @override
     async def async_set_native_value(self, value: float) -> None:
         """Update the priority value."""
-        old_value = self._attr_native_value
+        old_priority = self.get_priority()
         self._attr_native_value = value
         self.async_write_ha_state()
 
         _LOGGER.debug(
             "Priority changed for %s: %d -> %d",
             self.name,
-            int(old_value),
+            old_priority,
             int(value),
         )
 
@@ -94,4 +112,6 @@ class ExcessSolarPriorityNumber(NumberEntity, RestoreEntity):
 
     def get_priority(self) -> int:
         """Return current priority as integer."""
+        if self._attr_native_value is None:
+            return self._initial_priority
         return int(self._attr_native_value)
