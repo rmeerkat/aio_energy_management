@@ -116,17 +116,15 @@ class EnergyManagementCoordinator:
 
     def clear_archived(self, entity_id: str, retention_days: int) -> None:
         """Clear archived data older than retention days."""
-        now = dt_util.now()
+        oldest_end = dt_util.now() - timedelta(days=retention_days)
         if entity_data := self.data.get(entity_id):
-            archived = entity_data.get("archived", [])
+            archived = entity_data.get("archived") or []
+            # Items without a valid end time cannot be placed in time: drop them.
             filtered_archived = [
                 item
                 for item in archived
-                if "end" in item
-                and (
-                    from_str_to_datetime(item["end"])
-                    >= now - timedelta(days=retention_days)
-                )
+                if (end := from_str_to_datetime(item.get("end"))) is not None
+                and end >= oldest_end
             ]
             self.data[entity_id]["archived"] = filtered_archived
             _LOGGER.debug(

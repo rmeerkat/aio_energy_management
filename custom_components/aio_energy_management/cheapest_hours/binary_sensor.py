@@ -132,7 +132,8 @@ class CheapestHoursBinarySensor(BinarySensorEntity):
             self._mtu = mtu
 
         if h := number_of_hours:
-            if mtu == 15:
+            # An entity id is resolved (and multiplied) on every update instead.
+            if mtu == 15 and isinstance(h, (int, float)):
                 self._number_of_slots = h * 4
             else:
                 self._number_of_slots = h
@@ -144,6 +145,17 @@ class CheapestHoursBinarySensor(BinarySensorEntity):
 
         if trigger_time is not None:
             self._trigger_time = from_str_to_time(trigger_time)
+            if self._trigger_time is None:
+                _LOGGER.error(
+                    "Invalid trigger_time %r for %s; it is ignored", trigger_time, name
+                )
+
+        if not self._has_price_source():
+            _LOGGER.error(
+                "No price source configured for %s. Configure one of nordpool_entity, "
+                "nordpool_official_config_entry, entsoe_entity or stromligning_entity",
+                name,
+            )
 
         self.hass = hass
         self._data = self._coordinator.get_data(self._attr_unique_id)
@@ -336,6 +348,10 @@ class CheapestHoursBinarySensor(BinarySensorEntity):
                 if self._is_expired():
                     self._data["list"] = []
                 return
+
+        # No price source configured (already logged at startup)
+        else:
+            return
 
         cheapest = None
 
@@ -666,11 +682,16 @@ class CheapestHoursBinarySensor(BinarySensorEntity):
 
         # Ensure raw_today first value is actually today as we might get old values
         # if Home Assistant event loop has not reached nord pool yet")
-        if raw_today := np.attributes.get("raw_today"):
-            if first := from_str_to_datetime(get_first(raw_today).get("start")):
-                if first.date() != dt_util.start_of_local_day().date():
-                    _LOGGER.debug("Nord pool provided old data: Ignore")
-                    raise ValueNotFound
+        raw_today = np.attributes.get("raw_today")
+        if not raw_today:
+            _LOGGER.debug(
+                "No raw values for today in Norpool entity %s ", self._nordpool_entity
+            )
+            raise ValueNotFound
+        if first := from_str_to_datetime(get_first(raw_today).get("start")):
+            if first.date() != dt_util.start_of_local_day().date():
+                _LOGGER.debug("Nord pool provided old data: Ignore")
+                raise ValueNotFound
 
         raw_tomorrow = np.attributes.get("raw_tomorrow")
         if raw_tomorrow is None:
@@ -703,7 +724,7 @@ class CheapestHoursBinarySensor(BinarySensorEntity):
         ]
         if active_mtu != self._mtu:
             raise SystemConfigurationError(
-                f"MTU value {self._mtu} does not match the actual data MTU {active_mtu} used by nord pool official integration. Please correct the configuration"
+                f"MTU value {self._mtu} does not match the actual data MTU {active_mtu} used by nord pool integration. Please correct the configuration"
             )
         return (today, tomorrow, active_mtu)
 
@@ -757,7 +778,7 @@ class CheapestHoursBinarySensor(BinarySensorEntity):
 
         if active_mtu != self._mtu:
             raise SystemConfigurationError(
-                f"MTU value {self._mtu} does not match the actual data MTU {active_mtu} used by nord pool official integration. Please correct the configuration"
+                f"MTU value {self._mtu} does not match the actual data MTU {active_mtu} used by Entso-e integration. Please correct the configuration"
             )
 
         return (today, tomorrow, active_mtu)
@@ -990,6 +1011,18 @@ class CheapestHoursBinarySensor(BinarySensorEntity):
 
         return (today, tomorrow, active_mtu)
 
+    def _has_price_source(self) -> bool:
+        """Return True if a price source is configured."""
+        return any(
+            source is not None
+            for source in (
+                self._nordpool_official_config_entry,
+                self._nordpool_entity,
+                self._entsoe_entity,
+                self._stromligning_entity,
+            )
+        )
+
     def _is_failsafe(self) -> bool:
         if (
             self._data is None
@@ -1002,6 +1035,8 @@ class CheapestHoursBinarySensor(BinarySensorEntity):
         if failsafe := self._data.get("failsafe"):
             start = from_str_to_time(failsafe.get("start"))
             end = from_str_to_time(failsafe.get("end"))
+            if start is None or end is None:
+                return False
             failsafe_on = time_in_between(dt_util.now().time(), start, end)
             _LOGGER.debug("Running on failsafe: %s", failsafe_on)
             return failsafe_on
@@ -1009,8 +1044,10 @@ class CheapestHoursBinarySensor(BinarySensorEntity):
         return False
 
     def _construct_data_attributes(self) -> dict:
-        # Make some manipulation of the data stucture returned to the user
-        d = self._data
+        # Make some manipulation of the data stucture returned to the user.
+        # Build the attributes from a copy: changing self._data here would also
+        # change the coordinator's stored data.
+        d = dict(self._data)
 
         # Move extra data from 'extra' to root
         if extras := self._data.get("extra"):

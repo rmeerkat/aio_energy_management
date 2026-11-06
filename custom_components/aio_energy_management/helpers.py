@@ -32,6 +32,8 @@ def from_str_to_time(value) -> time | None:
 
     if isinstance(value, str):
         value = dt_util.parse_time(value)
+        if value is None:  # Not a valid time
+            return None
 
     return datetime.combine(datetime.today(), value).timetz()
 
